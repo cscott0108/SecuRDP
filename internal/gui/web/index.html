@@ -26,6 +26,7 @@
 <nav>
   <button class="tab active" data-tab="connect">Connect</button>
   <button class="tab" data-tab="server">This PC (server)</button>
+  <button class="tab hidden" data-tab="computers" id="tab-btn-computers">Computers (hub)</button>
   <button class="tab" data-tab="users">Users &amp; Authenticator</button>
   <button class="tab" data-tab="log">Activity log</button>
   <button class="tab" data-tab="help">Help</button>
@@ -66,6 +67,15 @@
   <div class="needs-admin card warn hidden">
     <b>Administrator rights needed.</b> Setting up this PC as a SecuRDP server changes the firewall and installs a Windows service.
     <div class="actions"><button class="elevate primary">Restart as administrator</button></div>
+  </div>
+
+  <div class="card admin-only-block">
+    <h3>What should this PC do?</h3>
+    <div class="roles">
+      <label class="role"><input type="radio" name="role" value="server"> <span><b>Server</b> &mdash; let me Remote Desktop into <i>this</i> PC from outside.</span></label>
+      <label class="role"><input type="radio" name="role" value="hub"> <span><b>Hub</b> &mdash; one front door for several PCs at home. I log in here and get forwarded to the PC I pick (set them up on the <b>Computers</b> tab).</span></label>
+    </div>
+    <p class="muted small">Using this PC only to connect <i>out</i> to others? Nothing to set up here &mdash; just use the Connect tab.</p>
   </div>
 
   <div class="card">
@@ -111,9 +121,49 @@
       <button id="ip-refresh">Refresh</button>
     </div>
     <p id="ip-note" class="muted small"></p>
+    <p id="ddns-addr" class="hidden">Or, with Dynamic DNS: <b><code id="ddns-addr-text"></code></b> <button id="ddns-copy">Copy</button></p>
     <p>On your router, forward <b>TCP</b> port <b class="gate-port">?</b> to this PC at <b id="lan-ips">?</b> (port <b class="gate-port">?</b>). Do <b>not</b> forward 3389.</p>
     <p>Server fingerprint &mdash; the first time you connect from another computer, check it matches this exactly:</p>
     <pre id="fingerprint" class="fp">(available after setup)</pre>
+  </div>
+
+  <div class="card admin-only-block">
+    <h3>5. Dynamic DNS (DuckDNS) &mdash; optional</h3>
+    <p class="muted">Gives your home a name like <code>myhome.duckdns.org</code> that follows your public IP, so saved computers never need editing when your ISP changes it. The SecuRDP service checks every 5 minutes and updates DuckDNS when the IP changes.</p>
+    <ol class="small muted">
+      <li>Go to <b>duckdns.org</b> and sign in (Google, GitHub, etc.).</li>
+      <li>Type a name under <i>sub domain</i> and click <b>add domain</b>.</li>
+      <li>Copy the <b>token</b> shown at the top of that page and paste both below.</li>
+    </ol>
+    <div class="grid2">
+      <label>DuckDNS name<input id="d-domain" placeholder="myhome  (or myhome.duckdns.org)" autocomplete="off"></label>
+      <label>Token<input id="d-token" type="password" autocomplete="off" placeholder="paste token"></label>
+      <label class="check wide"><input type="checkbox" id="d-enabled"> <span>Keep this name pointed at my public IP</span></label>
+    </div>
+    <div class="actions"><button id="d-save" class="primary">Save &amp; update now</button><button id="d-update">Update now</button></div>
+    <p id="d-status" class="small"></p>
+  </div>
+</section>
+
+<!-- ================= COMPUTERS (hub) ================= -->
+<section id="tab-computers" class="panel hidden">
+  <div class="admin-only-block">
+    <div class="row-between"><h2>Computers this hub can reach</h2><button id="add-computer" class="primary">+ Add computer</button></div>
+    <p class="muted">Each computer needs Remote Desktop turned on (with NLA). Connect to one by logging in as <code><span class="eg-user">you</span>+<i>name</i></code>, e.g. <code><span class="eg-user">you</span>+desktop</code>. Logging in without a <code>+name</code> goes to the default computer. Only the addresses listed here can ever be reached through the hub.</p>
+    <div id="computers"></div>
+    <label class="check"><input type="checkbox" id="c-thispc"> <span>Also allow Remote Desktop to <b>this hub PC</b> itself (as <code>+this-pc</code>)</span></label>
+
+    <div id="computer-form" class="card hidden">
+      <h3 id="cf-title">Add computer</h3>
+      <input type="hidden" id="cf-original">
+      <div class="grid2">
+        <label>Name <span class="muted">(typed after + in the username)</span><input id="cf-name" placeholder="desktop" autocomplete="off"></label>
+        <label>Address on your home network<input id="cf-address" placeholder="192.168.1.50  or  DESKTOP-PC  (:port if not 3389)"></label>
+        <label>MAC address <span class="muted">(optional, for Wake-on-LAN)</span><input id="cf-mac" placeholder="00-11-22-33-44-55"></label>
+      </div>
+      <p class="muted small">Tip: give each PC a fixed address (a DHCP reservation on your router) so it doesn't change. On that PC, <code>ipconfig /all</code> shows its IPv4 address and Physical Address (MAC).</p>
+      <div class="actions"><button id="cf-save" class="primary">Save</button><button id="cf-cancel">Cancel</button></div>
+    </div>
   </div>
 </section>
 

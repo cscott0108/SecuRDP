@@ -22,6 +22,7 @@ import (
 
 	"securdp/internal/auth"
 	"securdp/internal/config"
+	"securdp/internal/ddns"
 	"securdp/internal/logx"
 	"securdp/internal/winutil"
 )
@@ -87,11 +88,21 @@ func (s *Server) config() *config.Server {
 	return s.cfg
 }
 
-func (s *Server) rdpTarget() string {
-	if t := s.config().RDPTarget; t != "" {
-		return t
+// rdpTarget is the address to dial for a computer. "this-pc" is the local
+// RDP port (or RDPTarget when set); hub computers use their configured address.
+func (s *Server) rdpTarget(computer string) (string, *config.Computer) {
+	cfg := s.config()
+	c := cfg.FindComputer(computer)
+	if c == nil {
+		return "", nil
 	}
-	return fmt.Sprintf("127.0.0.1:%d", winutil.GetRDPInfo().Port)
+	if c.Name != config.ThisPC {
+		return c.DialAddress(), c
+	}
+	if cfg.RDPTarget != "" {
+		return cfg.RDPTarget, c
+	}
+	return fmt.Sprintf("127.0.0.1:%d", winutil.GetRDPInfo().Port), c
 }
 
 func ipOf(a net.Addr) string {
@@ -130,7 +141,9 @@ func (s *Server) authenticate(conn ssh.ConnMetadata, ask ssh.KeyboardInteractive
 		return nil, errors.New("denied")
 	}
 	cfg := s.config()
-	user := cfg.FindUser(conn.User())
+	// "name+computer" picks a hub computer; the part before '+' is the account.
+	login, wanted := config.SplitLogin(conn.User())
+	user := cfg.FindUser(login)
 
 	// Always do the expensive work so timing doesn't reveal valid usernames.
 	pwOK := false
@@ -140,24 +153,33 @@ func (s *Server) authenticate(conn ssh.ConnMetadata, ask ssh.KeyboardInteractive
 		auth.BurnTime(answers[0])
 	}
 	codeOK := false
+	var step int64
 	if user != nil && user.Enabled {
 		if secret, err := config.UnprotectSecret(user.TOTPSecret); err == nil {
-			step, ok := auth.VerifyTOTP(secret, answers[1], time.Now())
+			var ok bool
+			step, ok = auth.VerifyTOTP(secret, answers[1], time.Now())
 			s.mu.Lock()
-			key := strings.ToLower(user.Username)
-			if ok && step > s.lastStep[key] {
-				codeOK = true
-				if pwOK {
-					s.lastStep[key] = step // only burn the code on a full success
-				}
-			}
+			codeOK = ok && step > s.lastStep[strings.ToLower(user.Username)]
 			s.mu.Unlock()
 		}
 	}
 
 	if pwOK && codeOK {
+		target, err := cfg.ResolveTarget(user, wanted)
+		if err != nil {
+			// Right credentials, wrong computer: refuse, but it isn't an
+			// attack, so it doesn't count towards a ban or burn the code.
+			s.log.Printf("REJECT %s user=%s: %v", ip, user.Username, err)
+			return nil, errors.New("denied")
+		}
+		s.mu.Lock()
+		s.lastStep[strings.ToLower(user.Username)] = step // each code works once
+		s.mu.Unlock()
 		s.limiter.Succeed(ip)
-		return &ssh.Permissions{Extensions: map[string]string{"user": user.Username}}, nil
+		if target.MAC != "" {
+			go s.wakeIfAsleep(target)
+		}
+		return &ssh.Permissions{Extensions: map[string]string{"user": user.Username, "computer": target.Name}}, nil
 	}
 	if s.limiter.Fail(ip) {
 		s.log.Printf("BAN %s after repeated failures (last username tried: %q)", ip, conn.User())
@@ -213,8 +235,19 @@ func Run(ctx context.Context, log *logx.Logger) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("listening on %s, forwarding to %s, host key %s", addr, s.rdpTarget(), ssh.FingerprintSHA256(signer.PublicKey()))
+	var names []string
+	for _, c := range cfg.ActiveComputers() {
+		t, _ := s.rdpTarget(c.Name)
+		names = append(names, c.Name+"="+t)
+	}
+	mode := "server"
+	if cfg.IsHub() {
+		mode = "hub"
+	}
+	log.Printf("listening on %s (%s mode), computers: %s, host key %s", addr, mode, strings.Join(names, ", "),
+		ssh.FingerprintSHA256(signer.PublicKey()))
 	go func() { <-ctx.Done(); ln.Close() }()
+	go ddns.Run(ctx, log) // no-op unless DuckDNS is configured
 
 	for {
 		c, err := ln.Accept()
@@ -263,9 +296,12 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 	defer s.sessions.Add(-1)
 
 	user := conn.Permissions.Extensions["user"]
+	computer := conn.Permissions.Extensions["computer"]
 	start := time.Now()
-	s.log.Printf("LOGIN %s user=%s", ip, user)
-	defer func() { s.log.Printf("LOGOUT %s user=%s after %s", ip, user, time.Since(start).Round(time.Second)) }()
+	s.log.Printf("LOGIN %s user=%s computer=%s", ip, user, computer)
+	defer func() {
+		s.log.Printf("LOGOUT %s user=%s computer=%s after %s", ip, user, computer, time.Since(start).Round(time.Second))
+	}()
 
 	// Refuse every global request (e.g. remote port forwarding).
 	go ssh.DiscardRequests(reqs)
@@ -319,7 +355,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 			nc.Reject(ssh.Prohibited, "only RDP forwarding is permitted")
 			continue
 		}
-		go s.forward(nc, tr)
+		go s.forward(nc, tr, computer)
 	}
 }
 
@@ -376,14 +412,24 @@ func (t *tracker) stop() {
 	t.disarm()
 }
 
-// forward connects a direct-tcpip channel to the RDP target. The destination
-// the client asked for is ignored on purpose: it is always the local RDP port.
-func (s *Server) forward(nc ssh.NewChannel, tr *tracker) {
-	target := s.rdpTarget()
+// forward connects a direct-tcpip channel to the RDP port of the computer
+// chosen at login. The destination the client asked for is ignored on
+// purpose: only the configured address of that computer is ever dialled.
+func (s *Server) forward(nc ssh.NewChannel, tr *tracker, computer string) {
+	target, c := s.rdpTarget(computer)
+	if c == nil {
+		nc.Reject(ssh.Prohibited, "that computer is no longer configured on the hub")
+		return
+	}
 	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
-		nc.Reject(ssh.ConnectionFailed, "RDP is not reachable on this computer")
-		s.log.Printf("RDP dial %s failed: %v", target, err)
+		msg := "Remote Desktop is not reachable on " + c.Name
+		if c.MAC != "" {
+			wakeOnLAN(c.MAC)
+			msg += " - sent a wake-up signal, try again in a minute"
+		}
+		nc.Reject(ssh.ConnectionFailed, msg)
+		s.log.Printf("RDP dial %s (%s) failed: %v", target, c.Name, err)
 		return
 	}
 	ch, reqs, err := nc.Accept()

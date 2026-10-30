@@ -226,6 +226,17 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/service/stop", true, func(*http.Request) (any, error) { return nil, service.Stop() })
 	a.api(mux, "/api/rdp/enable", true, func(*http.Request) (any, error) { return nil, winutil.EnableRDP() })
 
+	// --- hub (admin) ---
+	a.api(mux, "/api/hub/mode", true, setMode)
+	a.api(mux, "/api/computers/save", true, saveComputer)
+	a.api(mux, "/api/computers/delete", true, deleteComputer)
+	a.api(mux, "/api/computers/default", true, setDefaultComputer)
+	a.api(mux, "/api/computers/test", true, testComputer)
+	a.api(mux, "/api/computers/wake", true, wakeComputer)
+	a.api(mux, "/api/users/access", true, setUserAccess)
+	a.api(mux, "/api/ddns/save", true, saveDDNS)
+	a.api(mux, "/api/ddns/update", true, updateDDNS)
+
 	// --- client side ---
 	a.api(mux, "/api/profiles/save", false, a.saveProfile)
 	a.api(mux, "/api/profiles/delete", false, a.deleteProfile)
@@ -236,8 +247,10 @@ func (a *app) routes() http.Handler {
 }
 
 type userView struct {
-	Username string `json:"username"`
-	Enabled  bool   `json:"enabled"`
+	Username   string   `json:"username"`
+	Enabled    bool     `json:"enabled"`
+	Restricted bool     `json:"restricted"`
+	Computers  []string `json:"computers"`
 }
 
 func (a *app) state(*http.Request) (any, error) {
@@ -258,8 +271,9 @@ func (a *app) state(*http.Request) (any, error) {
 		if err == nil {
 			users := []userView{}
 			for _, u := range cfg.Users {
-				users = append(users, userView{u.Username, u.Enabled})
+				users = append(users, userView{u.Username, u.Enabled, u.Restricted, append([]string{}, u.Computers...)})
 			}
+			st["hub"] = hubState(cfg)
 			st["settings"] = map[string]any{
 				"listen_port": cfg.ListenPort, "block_direct_rdp": cfg.BlockDirectRDP,
 				"max_failures": cfg.MaxFailures, "ban_minutes": cfg.BanMinutes,

@@ -1,21 +1,11 @@
 package gui
 
 import (
-	"context"
-	"io"
-	"net"
-	"net/http"
-	"strings"
 	"sync"
 	"time"
-)
 
-// Public IPv4 lookup services, tried in order. Each returns just the address.
-var ipServices = []string{
-	"https://api.ipify.org",
-	"https://checkip.amazonaws.com",
-	"https://ipv4.icanhazip.com",
-}
+	"securdp/internal/netinfo"
+)
 
 const ipRefresh = 5 * time.Minute
 
@@ -43,38 +33,14 @@ func (p *publicIP) get(force bool) (ip string, checked time.Time, errMsg string)
 }
 
 func (p *publicIP) fetch() {
-	ip, err := lookupPublicIP()
+	ip, err := netinfo.PublicIP()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.fetching = false
 	p.checked = time.Now()
-	if err != "" {
-		p.err = err
+	if err != nil {
+		p.err = err.Error()
 		return
 	}
 	p.ip, p.err = ip, ""
-}
-
-func lookupPublicIP() (string, string) {
-	client := &http.Client{Timeout: 6 * time.Second}
-	last := "no lookup service reachable"
-	for _, u := range ipServices {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			cancel()
-			last = err.Error()
-			continue
-		}
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-		resp.Body.Close()
-		cancel()
-		s := strings.TrimSpace(string(b))
-		if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
-			return ip.String(), ""
-		}
-		last = "unexpected reply from " + u
-	}
-	return "", last
 }

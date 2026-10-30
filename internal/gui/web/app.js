@@ -115,6 +115,7 @@ function render() {
   document.querySelectorAll(".gate-port").forEach((e) => (e.textContent = (s.settings && s.settings.listen_port) || "?"));
   renderPublicIP(s);
 
+  renderHub(s);
   renderUsers();
   renderProfiles();
   if (s.log !== undefined) {
@@ -199,8 +200,129 @@ svcAction("svc-restart", "service/restart", "Service restarted.");
 svcAction("svc-stop", "service/stop", "Service stopped.");
 svcAction("svc-uninstall", "service/uninstall", "Service removed.", "Remove the SecuRDP service and its firewall rules? Your users and settings are kept.");
 
+// ---------- hub: role, computers, DuckDNS ----------
+let computersSig = "";
+let renderedDDNS = false;
+function renderHub(s) {
+  const hub = s.hub;
+  const isHub = !!hub && hub.mode === "hub";
+  $("tab-btn-computers").classList.toggle("hidden", !isHub);
+  if (!hub) return;
+  document.querySelectorAll('input[name="role"]').forEach((r) => (r.checked = r.value === hub.mode));
+  const firstUser = (s.users && s.users[0] && s.users[0].username) || "you";
+  document.querySelectorAll(".eg-user").forEach((e) => (e.textContent = firstUser));
+
+  const comps = hub.computers || [];
+  $("c-thispc").checked = comps.some((c) => c.name === "this-pc");
+  const sig = JSON.stringify([comps, hub.default_computer]);
+  if (sig !== computersSig) {
+    computersSig = sig;
+    const box = $("computers");
+    box.innerHTML = "";
+    const others = comps.filter((c) => c.name !== "this-pc");
+    if (!others.length) box.append(el("p", { class: "muted" }, "No computers yet. Click \"Add computer\" for each PC with Remote Desktop turned on."));
+    const isDefault = (c) => hub.default_computer ? hub.default_computer === c.name : comps[0] && comps[0].name === c.name;
+    for (const c of comps) {
+      const actions = el("div", { class: "actions tight" },
+        el("button", { onclick: (e) => run(e.target, async () => {
+          const r = await api("computers/test", { name: c.name });
+          toast(r.message, r.ok ? "ok" : "err");
+        }) }, "Test"),
+        c.mac ? el("button", { onclick: (e) => run(e.target, async () => { const r = await api("computers/wake", { name: c.name }); toast(r.note); }) }, "Wake") : "",
+        isDefault(c) ? "" : el("button", { onclick: (e) => run(e.target, async () => { await api("computers/default", { name: c.name }); await refresh(); }) }, "Make default"),
+        c.name === "this-pc" ? "" : el("button", { onclick: () => editComputer(c) }, "Edit"),
+        c.name === "this-pc" ? "" : el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
+          if (!confirm(`Remove ${c.name} from the hub?`)) return;
+          await api("computers/delete", { name: c.name });
+          await refresh();
+        }) }, "Remove")
+      );
+      box.append(el("div", { class: "card row-between" },
+        el("div", {},
+          el("b", {}, c.name), " ", isDefault(c) ? el("span", { class: "pill good" }, "default") : "",
+          el("div", { class: "muted small" }, `${c.dial}` + (c.mac ? ` · MAC ${c.mac}` : "") + ` · log in as ${firstUser}+${c.name}`)
+        ),
+        actions
+      ));
+    }
+  }
+
+  const d = hub.ddns;
+  if (!renderedDDNS) {
+    renderedDDNS = true;
+    $("d-domain").value = d.domain || "";
+    $("d-enabled").checked = d.enabled;
+    $("d-token").placeholder = d.has_token ? "saved - paste a new one to replace it" : "paste token";
+  }
+  const st = d.status || {};
+  const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "never");
+  $("d-status").textContent = !d.enabled ? "Off." :
+    `${d.hostname} → ${st.ip || "?"} · last updated ${when(st.updated)} · last check ${when(st.checked)}` + (st.result ? ` · ${st.result}` : "");
+  $("d-status").className = "small " + (d.enabled && st.result && !["updated", "up to date"].includes(st.result) ? "bad-text" : "");
+  const port = s.settings && s.settings.listen_port;
+  $("ddns-addr").classList.toggle("hidden", !(d.enabled && d.hostname));
+  $("ddns-addr-text").textContent = d.hostname && port ? `${d.hostname}:${port}` : d.hostname || "";
+}
+
+document.querySelectorAll('input[name="role"]').forEach((r) =>
+  r.addEventListener("change", () => run(null, async () => {
+    await api("hub/mode", { mode: r.value });
+    toast(r.value === "hub" ? "Hub mode on - add your PCs on the Computers tab." : "Server mode: forwarding to this PC only.");
+    await refresh();
+  }))
+);
+
+$("c-thispc").addEventListener("change", (e) => run(null, async () => {
+  if (e.target.checked) await api("computers/save", { original: "", computer: { name: "this-pc" } });
+  else await api("computers/delete", { name: "this-pc" });
+  await refresh();
+}));
+
+function editComputer(c) {
+  $("computer-form").classList.remove("hidden");
+  $("cf-title").textContent = c ? "Edit " + c.name : "Add computer";
+  $("cf-original").value = c ? c.name : "";
+  $("cf-name").value = c ? c.name : "";
+  $("cf-address").value = c ? c.address : "";
+  $("cf-mac").value = c ? c.mac : "";
+  $("cf-name").focus();
+}
+$("add-computer").addEventListener("click", () => editComputer(null));
+$("cf-cancel").addEventListener("click", () => $("computer-form").classList.add("hidden"));
+$("cf-name").addEventListener("input", (e) => (e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")));
+$("cf-save").addEventListener("click", (e) => run(e.target, async () => {
+  const name = $("cf-name").value.trim();
+  await api("computers/save", {
+    original: $("cf-original").value,
+    computer: { name, address: $("cf-address").value.trim(), mac: $("cf-mac").value.trim() },
+  });
+  $("computer-form").classList.add("hidden");
+  const r = await api("computers/test", { name });
+  toast(r.ok ? `Saved. ${r.message}.` : `Saved, but: ${r.message}`, r.ok ? "ok" : "err");
+  await refresh();
+}));
+
+$("d-save").addEventListener("click", (e) => run(e.target, async () => {
+  const st = await api("ddns/save", { enabled: $("d-enabled").checked, domain: $("d-domain").value, token: $("d-token").value });
+  $("d-token").value = "";
+  renderedDDNS = false;
+  toast(st.result && st.result !== "updated" && st.result !== "up to date" ? "Saved, but: " + st.result : "Saved.", st.result && !["updated", "up to date"].includes(st.result) ? "err" : "ok");
+  await refresh();
+}));
+$("d-update").addEventListener("click", (e) => run(e.target, async () => {
+  const st = await api("ddns/update");
+  toast(st.result === "updated" ? "DuckDNS updated." : st.result, st.result === "updated" ? "ok" : "err");
+  await refresh();
+}));
+$("ddns-copy").addEventListener("click", () => copyAddr($("ddns-addr-text").textContent));
+
 // ---------- users ----------
+let usersSig = "";
 function renderUsers() {
+  const hub = state.hub || {};
+  const sig = JSON.stringify([state.users, hub.mode, hub.computers]);
+  if (sig === usersSig) return;
+  usersSig = sig;
   const box = $("users");
   box.innerHTML = "";
   const users = state.users || [];
@@ -209,8 +331,8 @@ function renderUsers() {
     return;
   }
   for (const u of users) {
-    box.append(
-      el("div", { class: "card row-between" },
+    const card = el("div", { class: "card" },
+      el("div", { class: "row-between" },
         el("div", {}, el("b", {}, u.username), " ", el("span", { class: "pill " + (u.enabled ? "good" : "bad") }, u.enabled ? "enabled" : "disabled")),
         el("div", { class: "actions tight" },
           el("button", { onclick: (e) => run(e.target, async () => { await api("users/toggle", { username: u.username }); await refresh(); }) }, u.enabled ? "Disable" : "Enable"),
@@ -223,7 +345,35 @@ function renderUsers() {
         )
       )
     );
+    if (hub.mode === "hub") card.append(userAccess(u, hub.computers || []));
+    box.append(card);
   }
+}
+
+// Hub mode: which computers a user may reach.
+function userAccess(u, computers) {
+  const save = (restricted, list) => run(null, async () => {
+    await api("users/access", { username: u.username, restricted, computers: list });
+    await refresh();
+  });
+  const all = el("input", { type: "checkbox" });
+  all.checked = !u.restricted;
+  const boxes = computers.map((c) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = !u.restricted || (u.computers || []).includes(c.name);
+    cb.disabled = !u.restricted;
+    cb.dataset.name = c.name;
+    return cb;
+  });
+  const current = () => boxes.filter((b) => b.checked).map((b) => b.dataset.name);
+  all.addEventListener("change", () => save(!all.checked, all.checked ? [] : current()));
+  boxes.forEach((b) => b.addEventListener("change", () => save(true, current())));
+  return el("div", { class: "access" },
+    el("span", { class: "muted small" }, "Can reach: "),
+    el("label", { class: "check" }, all, el("span", {}, "All computers")),
+    ...computers.map((c, i) => el("label", { class: "check" }, boxes[i], el("span", {}, c.name))),
+    computers.length ? "" : el("span", { class: "muted small" }, "(add computers on the Computers tab)")
+  );
 }
 
 // Live feedback mirroring the server-side rules in internal/auth/password.go.

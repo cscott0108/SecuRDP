@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -75,6 +78,39 @@ type User struct {
 	TOTPSecret   string `json:"totp_secret"`   // DPAPI-protected, base64 (see secret.go)
 	Enabled      bool   `json:"enabled"`
 	LastTOTPStep int64  `json:"-"` // in-memory replay protection
+	// Hub mode: when Restricted, the user may only reach Computers;
+	// otherwise every computer on the hub.
+	Restricted bool     `json:"restricted,omitempty"`
+	Computers  []string `json:"computers,omitempty"`
+}
+
+// ThisPC is the built-in computer name for the gate PC's own Remote Desktop.
+const ThisPC = "this-pc"
+
+// Computer is a Remote Desktop target the hub may forward to. Users pick it
+// by logging in as "username+name".
+type Computer struct {
+	Name    string `json:"name"`          // lowercase slug, e.g. "desktop"
+	Address string `json:"address"`       // host or host:port on the home network ("" for this-pc)
+	MAC     string `json:"mac,omitempty"` // for Wake-on-LAN
+}
+
+// DDNS keeps a dynamic DNS name pointed at this network's public IP.
+type DDNS struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider"` // "duckdns"
+	Domain   string `json:"domain"`   // e.g. "myhome" for myhome.duckdns.org
+	Token    string `json:"token"`    // DPAPI-protected
+}
+
+func DDNSStatusPath() string { return filepath.Join(ServerDir(), "ddns-status.json") }
+
+// DDNSStatus is written by the service after each update attempt.
+type DDNSStatus struct {
+	IP      string `json:"ip"`
+	Updated int64  `json:"updated"` // unix time of last successful update
+	Checked int64  `json:"checked"` // unix time of last attempt
+	Result  string `json:"result"`
 }
 
 // Server is the gatekeeper service configuration.
@@ -90,6 +126,122 @@ type Server struct {
 	BlockDirectRDP  bool   `json:"block_direct_rdp"`     // firewall rule blocking 3389 from the network
 	AllowedSources  []string `json:"allowed_sources"`    // optional CIDR allow-list; empty = any
 	Users           []User `json:"users"`
+
+	// Mode is "server" (forward to this PC only) or "hub" (forward to the
+	// Computers list). Empty means "server".
+	Mode            string     `json:"mode,omitempty"`
+	Computers       []Computer `json:"computers,omitempty"`
+	DefaultComputer string     `json:"default_computer,omitempty"`
+	DDNS            DDNS       `json:"ddns"`
+}
+
+func (s *Server) IsHub() bool { return s.Mode == "hub" }
+
+// ActiveComputers is what the gate can forward to right now. Server mode
+// (and a hub with nothing configured yet) is just this PC.
+func (s *Server) ActiveComputers() []Computer {
+	if !s.IsHub() || len(s.Computers) == 0 {
+		return []Computer{{Name: ThisPC}}
+	}
+	return s.Computers
+}
+
+// FindComputer looks a computer up by name among the active ones.
+func (s *Server) FindComputer(name string) *Computer {
+	for _, c := range s.ActiveComputers() {
+		if strings.EqualFold(c.Name, name) {
+			c := c
+			return &c
+		}
+	}
+	return nil
+}
+
+// CanReach reports whether u may use computer name.
+func (u *User) CanReach(name string) bool {
+	if !u.Restricted {
+		return true
+	}
+	for _, c := range u.Computers {
+		if strings.EqualFold(c, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitLogin splits "user+computer" into its parts ("user", "" without a +).
+func SplitLogin(login string) (user, computer string) {
+	if i := strings.LastIndexByte(login, '+'); i > 0 {
+		return login[:i], strings.ToLower(login[i+1:])
+	}
+	return login, ""
+}
+
+// ResolveTarget picks the computer for a login: the one named after '+', or
+// the default computer, or the user's first reachable one.
+func (s *Server) ResolveTarget(u *User, requested string) (*Computer, error) {
+	if requested != "" {
+		c := s.FindComputer(requested)
+		if c == nil {
+			return nil, fmt.Errorf("unknown computer %q", requested)
+		}
+		if !u.CanReach(c.Name) {
+			return nil, fmt.Errorf("user %s may not reach %q", u.Username, c.Name)
+		}
+		return c, nil
+	}
+	if s.DefaultComputer != "" {
+		if c := s.FindComputer(s.DefaultComputer); c != nil && u.CanReach(c.Name) {
+			return c, nil
+		}
+	}
+	for _, c := range s.ActiveComputers() {
+		if u.CanReach(c.Name) {
+			c := c
+			return &c, nil
+		}
+	}
+	return nil, fmt.Errorf("user %s has no computers assigned", u.Username)
+}
+
+var computerName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// ValidateComputer checks a computer entry (name slug, address, MAC).
+func ValidateComputer(c Computer) error {
+	if !computerName.MatchString(c.Name) {
+		return errors.New("computer name must be 1-32 lowercase letters, digits or '-' (it's typed after '+' in the username)")
+	}
+	if c.Name == ThisPC {
+		return nil
+	}
+	if c.Address == "" {
+		return errors.New("address is required")
+	}
+	host, port := c.Address, "3389"
+	if h, p, err := net.SplitHostPort(c.Address); err == nil {
+		host, port = h, p
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return errors.New("port must be 1-65535")
+	}
+	if host == "" || strings.ContainsAny(host, " /\\") {
+		return errors.New("address must be an IP address or computer name, optionally with :port")
+	}
+	if c.MAC != "" {
+		if _, err := net.ParseMAC(c.MAC); err != nil {
+			return errors.New("MAC address should look like 00-11-22-33-44-55")
+		}
+	}
+	return nil
+}
+
+// DialAddress returns host:port for a computer (default port 3389).
+func (c Computer) DialAddress() string {
+	if _, _, err := net.SplitHostPort(c.Address); err == nil {
+		return c.Address
+	}
+	return net.JoinHostPort(c.Address, "3389")
 }
 
 func DefaultServer() *Server {

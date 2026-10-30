@@ -92,6 +92,27 @@ securdp status | install | uninstall | serve
 
 Any standard SSH client works as well, e.g. `ssh -N -L 13389:127.0.0.1:3389 -p 47213 myuser@home.example.net`, then RDP to `127.0.0.1:13389`.
 
+## Hub mode: one front door for several PCs
+
+On an always-on PC (e.g. the Plex server), choose **Hub** under *This PC → What should this PC do?*:
+
+```
+client ──SSH──► router :port ──► hub (SecuRDP) ──► desktop 192.168.1.50:3389
+                                     login + code  ├─► laptop  192.168.1.93:3389
+                                     allow-list    └─► …
+```
+
+- **Computers tab:** add each PC with a name, its home-network address and, optionally, its MAC address for Wake-on-LAN. **Test** checks that Remote Desktop answers. Only these addresses can ever be reached through the hub.
+- **Picking a PC:** log in as `username+name`, e.g. `alex+desktop`. No `+name` goes to the default computer. Existing Windows and Android clients work unchanged: save one profile per PC with the matching username.
+- **Users tab:** each user can reach *All computers*, or only the ones ticked.
+- **The PCs behind the hub** only need Remote Desktop with NLA, reachable from the hub. The "block RDP from the internet" rule already allows home-network addresses. They don't need SecuRDP installed or a port forward.
+- **Wake-on-LAN:** if a PC with a MAC address doesn't answer at login, the hub sends a wake-up packet. Reconnect after it boots.
+- **Server mode** behaves exactly as before, with only this PC reachable. Switching modes needs no service restart.
+
+### Dynamic DNS (DuckDNS)
+
+*This PC → 5. Dynamic DNS*: sign in at duckdns.org, add a name, then paste the name and token. The service checks your public IP every 5 minutes and updates DuckDNS when it changes, plus a daily refresh. Clients then use `name.duckdns.org:port`. The token is stored encrypted, and DDNS events appear in the activity log.
+
 ## Android app
 
 `android/` is a native Kotlin app that does the same job as the Windows client. It keeps saved computers, asks for your password and authenticator code each time, pins the server fingerprint, and holds the encrypted tunnel in a foreground service with a **Disconnect** notification. It then opens Microsoft's **Windows App** at the tunnel (`127.0.0.1:13389`, a different port for each saved computer). The tunnel closes 2 minutes after the last Remote Desktop connection ends.

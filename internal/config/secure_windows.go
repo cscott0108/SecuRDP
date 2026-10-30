@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// LockServerDir is turned off only by tests that use a throwaway folder.
+var LockServerDir = true
+
 // EnsureServerDir creates %ProgramData%\SecuRDP and restricts it to
 // SYSTEM and Administrators only (inheritance removed, so normal users
 // cannot read the password hashes or TOTP secrets).
@@ -18,6 +21,9 @@ func EnsureServerDir() error {
 	dir := ServerDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if !LockServerDir {
+		return nil
 	}
 	// Lock the folder only; files inherit from it. (Applying the (OI)(CI)
 	// grants to files with /T strips them to an empty, unreadable ACL.)
