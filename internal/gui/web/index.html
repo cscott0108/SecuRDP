@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SecuRDP</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" type="image/png" href="icon.png">
+</head>
+<body>
+<header>
+  <div class="brand"><img class="logo" src="icon.png" alt=""> SecuRDP</div>
+  <div class="hdr-right">
+    <button id="ip-pill" class="pill pill-btn" title="This network's public IP - click to copy">public IP: …</button>
+    <span id="svc-pill" class="pill">service: …</span>
+    <span id="admin-pill" class="pill"></span>
+  </div>
+</header>
+
+<nav>
+  <button class="tab active" data-tab="connect">Connect</button>
+  <button class="tab" data-tab="server">This PC (server)</button>
+  <button class="tab" data-tab="users">Users &amp; Authenticator</button>
+  <button class="tab" data-tab="log">Activity log</button>
+  <button class="tab" data-tab="help">Help</button>
+</nav>
+
+<main>
+<div id="toast" class="toast hidden"></div>
+
+<!-- ================= CONNECT ================= -->
+<section id="tab-connect" class="panel">
+  <div class="row-between">
+    <h2>Remote computers</h2>
+    <button id="add-profile" class="primary">+ Add computer</button>
+  </div>
+  <p class="muted">Each saved computer remembers its address, port and usernames. Your gate password and authenticator code are asked every time and never stored.</p>
+  <div id="profiles"></div>
+
+  <div id="profile-form" class="card hidden">
+    <h3 id="pf-title">Add computer</h3>
+    <input type="hidden" id="pf-original">
+    <div class="grid2">
+      <label>Name<input id="pf-name" placeholder="Office PC"></label>
+      <label>Address (public IP or hostname)<input id="pf-host" placeholder="203.0.113.10 or home.example.net"></label>
+      <label>Port<input id="pf-port" type="number" min="1" max="65535" placeholder="e.g. 47213"></label>
+      <label>SecuRDP username<input id="pf-user" autocomplete="off"></label>
+      <label>Windows username on that PC <span class="muted">(optional)</span><input id="pf-rdpuser" placeholder="e.g. john or MicrosoftAccount\you@outlook.com"></label>
+      <label class="check"><input type="checkbox" id="pf-full"> Open Remote Desktop full screen</label>
+    </div>
+    <div class="actions">
+      <button id="pf-save" class="primary">Save</button>
+      <button id="pf-cancel">Cancel</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SERVER ================= -->
+<section id="tab-server" class="panel hidden">
+  <div class="needs-admin card warn hidden">
+    <b>Administrator rights needed.</b> Setting up this PC as a SecuRDP server changes the firewall and installs a Windows service.
+    <div class="actions"><button class="elevate primary">Restart as administrator</button></div>
+  </div>
+
+  <div class="card">
+    <h3>1. Remote Desktop on this PC</h3>
+    <p id="rdp-status"></p>
+    <div class="actions"><button id="rdp-enable" class="admin-only">Enable Remote Desktop (with NLA)</button></div>
+  </div>
+
+  <div class="card admin-only-block">
+    <h3>2. Gate settings</h3>
+    <div class="grid2">
+      <label>Gate port (open this on your router)
+        <div class="inline"><input id="s-port" type="number" min="1024" max="65535"><button id="s-randport" title="Pick a random high port">Random</button></div>
+      </label>
+      <label>Only allow these source IPs / ranges <span class="muted">(optional, comma separated)</span><input id="s-sources" placeholder="e.g. 198.51.100.7, 203.0.113.0/24"></label>
+      <label>Failed logins before IP is banned<input id="s-maxfail" type="number" min="1" max="20"></label>
+      <label>Ban duration (minutes, doubles on repeat)<input id="s-ban" type="number" min="1"></label>
+      <label>Max simultaneous sessions<input id="s-maxsess" type="number" min="1" max="10"></label>
+      <label>Close tunnel this many minutes after Remote Desktop disconnects <span class="muted">(0 = never; an open session is never cut)</span><input id="s-idle" type="number" min="0"></label>
+      <label class="check wide"><input type="checkbox" id="s-block"> <span>Block direct Remote Desktop (port <span class="rdp-port">3389</span>) from the <b>internet</b> &mdash; recommended. Computers on your home network (and Tailscale/VPN addresses) can still RDP in directly, and RDP <i>from</i> this PC is never affected.</span></label>
+    </div>
+    <div class="actions"><button id="s-save" class="primary">Save settings</button></div>
+  </div>
+
+  <div class="card admin-only-block">
+    <h3>3. Service</h3>
+    <p>Status: <b id="svc-status">…</b></p>
+    <p class="muted">Installing copies SecuRDP to <code>C:\Program Files\SecuRDP</code>, runs it as a Windows service that starts with the PC, and adds the firewall rule for the gate port. Add a user first.</p>
+    <div class="actions">
+      <button id="svc-install" class="primary">Install / update service</button>
+      <button id="svc-restart">Restart</button>
+      <button id="svc-stop">Stop</button>
+      <button id="svc-uninstall" class="danger">Uninstall</button>
+    </div>
+  </div>
+
+  <div class="card admin-only-block">
+    <h3>4. Router &amp; identity</h3>
+    <p>From outside your home, connect to:</p>
+    <div class="addr-row">
+      <pre id="public-addr" class="fp">looking up…</pre>
+      <button id="ip-copy">Copy</button>
+      <button id="ip-refresh">Refresh</button>
+    </div>
+    <p id="ip-note" class="muted small"></p>
+    <p>On your router, forward <b>TCP</b> port <b class="gate-port">?</b> to this PC at <b id="lan-ips">?</b> (port <b class="gate-port">?</b>). Do <b>not</b> forward 3389.</p>
+    <p>Server fingerprint &mdash; the first time you connect from another computer, check it matches this exactly:</p>
+    <pre id="fingerprint" class="fp">(available after setup)</pre>
+  </div>
+</section>
+
+<!-- ================= USERS ================= -->
+<section id="tab-users" class="panel hidden">
+  <div class="needs-admin card warn hidden">
+    <b>Administrator rights needed</b> to manage users.
+    <div class="actions"><button class="elevate primary">Restart as administrator</button></div>
+  </div>
+  <div class="admin-only-block">
+    <div class="row-between"><h2>Users</h2><button id="add-user" class="primary">+ Add user</button></div>
+    <div id="users"></div>
+
+    <div id="user-wizard" class="card hidden">
+      <div id="uw-step1">
+        <h3>New user &mdash; step 1 of 2: credentials</h3>
+        <p class="muted">Username: 5+ characters, not something obvious like admin/root. Password: 14+ characters with 3 of lowercase, uppercase, digits, symbols. A long passphrase is ideal.</p>
+        <div class="grid2">
+          <label>Username<input id="uw-user" autocomplete="off"><span id="uw-user-hint" class="hint"></span></label>
+          <span></span>
+          <label>Password<input id="uw-pass" type="password" autocomplete="new-password"></label>
+          <label>Confirm password<input id="uw-pass2" type="password" autocomplete="new-password"><span id="uw-match" class="hint"></span></label>
+          <label class="check wide"><input type="checkbox" id="uw-show"> Show passwords</label>
+        </div>
+        <ul id="uw-rules" class="rules">
+          <li id="r-len"></li>
+          <li id="r-classes"></li>
+          <li id="r-user"></li>
+        </ul>
+        <div class="actions"><button id="uw-next" class="primary" disabled>Next: set up Google Authenticator</button><button class="uw-cancel">Cancel</button></div>
+      </div>
+      <div id="uw-step2" class="hidden">
+        <h3>Step 2 of 2: link Google Authenticator</h3>
+        <div class="qr-wrap">
+          <img id="uw-qr" alt="QR code">
+          <ol>
+            <li>Open <b>Google Authenticator</b> on your phone.</li>
+            <li>Tap the <b>+</b> button, then <b>Scan a QR code</b>.</li>
+            <li>Point the camera at the code on the left. A new entry named <b>SecuRDP</b> appears.</li>
+            <li>Type the 6-digit code it shows below and click <b>Confirm</b>.</li>
+          </ol>
+        </div>
+        <p class="muted">Can't scan? In the app choose <b>Enter a setup key</b>, use any account name, and type this key (type: Time based):</p>
+        <pre id="uw-secret" class="fp"></pre>
+        <p class="warn-text">Treat this QR code like a password. Anyone who scans it can generate your codes. It is shown only now.</p>
+        <div class="inline"><input id="uw-code" inputmode="numeric" maxlength="6" placeholder="123456"><button id="uw-confirm" class="primary">Confirm</button><button class="uw-cancel">Cancel</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= LOG ================= -->
+<section id="tab-log" class="panel hidden">
+  <div class="needs-admin card warn hidden">
+    <b>Administrator rights needed</b> to read the server log.
+    <div class="actions"><button class="elevate primary">Restart as administrator</button></div>
+  </div>
+  <div class="row-between"><h2>Activity log (this PC's gatekeeper)</h2><button id="log-refresh">Refresh</button></div>
+  <pre id="log" class="log"></pre>
+</section>
+
+<!-- ================= HELP ================= -->
+<section id="tab-help" class="panel hidden">
+  <div class="card">
+    <h3>How it works</h3>
+    <p>The PC you connect <i>to</i> runs the SecuRDP service on one port. You log in with username, password and a Google Authenticator code. Only then does it carry your Remote Desktop session, encrypted inside SSH, to this PC's own Remote Desktop. Nothing else on your network is reachable through it.</p>
+    <h3>Setting up the PC you connect to</h3>
+    <ol>
+      <li><b>This PC</b> tab &rarr; Restart as administrator.</li>
+      <li>Enable Remote Desktop if it is off.</li>
+      <li>Pick a gate port (Random is fine) and Save.</li>
+      <li><b>Users</b> tab &rarr; add your user and link Google Authenticator.</li>
+      <li><b>This PC</b> tab &rarr; Install service.</li>
+      <li>On your router, forward that TCP port to this PC. Write down the server fingerprint.</li>
+    </ol>
+    <h3>Connecting from another computer</h3>
+    <ol>
+      <li>Copy <code>securdp.exe</code> to that computer and run it (no admin needed).</li>
+      <li>Connect tab &rarr; Add computer: your home public IP (or a dynamic DNS name), the gate port, your username.</li>
+      <li>Click Connect, then enter your password and the current code from Google Authenticator.</li>
+      <li>The first time, compare the fingerprint with the one you wrote down.</li>
+      <li>Remote Desktop opens. Tick <b>Remember me</b> in its login box if you want Windows to save that PC's login. Each saved computer keeps its own.</li>
+      <li>Closing Remote Desktop closes the tunnel.</li>
+    </ol>
+    <p class="muted">Tip: the first time, Remote Desktop may warn that the certificate name doesn't match (it sees 127.0.0.x). That's expected with a tunnel. Tick "Don't ask me again" for that computer.</p>
+  </div>
+</section>
+</main>
+
+<!-- Host fingerprint dialog -->
+<div id="fp-modal" class="modal hidden">
+  <div class="modal-box">
+    <h3>First connection to this computer</h3>
+    <p>To be sure you're talking to <i>your</i> PC and not an impostor, compare this fingerprint with the one on that PC's <b>This PC</b> tab:</p>
+    <pre id="fp-value" class="fp"></pre>
+    <p class="muted">You only need to do this once. SecuRDP will refuse to connect if it ever changes.</p>
+    <div class="actions"><button id="fp-yes" class="primary">They match &mdash; connect</button><button id="fp-no">Cancel</button></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

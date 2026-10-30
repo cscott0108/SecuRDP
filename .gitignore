@@ -1,0 +1,15 @@
+# Build outputs (rebuild with build.ps1 / gradlew)
+*.exe
+*.exe~
+*.test
+*.out
+*.apk
+
+# Signing keys and secrets - never commit
+*.jks
+*.keystore
+keystore.properties
+
+# Local scratch
+Screenshot*.png
+Thumbs.db
