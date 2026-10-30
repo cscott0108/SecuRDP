@@ -53,6 +53,21 @@ document.querySelectorAll(".tab").forEach((b) =>
   })
 );
 
+// Header badge: "standard user ▾" opens a menu to restart elevated.
+function setAdminMenu(open) {
+  $("admin-menu").classList.toggle("hidden", !open);
+  $("admin-pill").setAttribute("aria-expanded", String(open));
+}
+$("admin-pill").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!state.elevated) setAdminMenu($("admin-menu").classList.contains("hidden"));
+});
+document.addEventListener("click", (e) => { if (!e.target.closest(".pill-menu")) setAdminMenu(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") setAdminMenu(false); });
+$("admin-elevate").addEventListener("click", (e) =>
+  run(e.target, async () => { setAdminMenu(false); await api("elevate"); toast("Reopening as administrator…"); })
+);
+
 document.querySelectorAll(".elevate").forEach((b) =>
   b.addEventListener("click", () => run(b, async () => { await api("elevate"); toast("Reopening as administrator…"); }))
 );
@@ -67,8 +82,9 @@ function render() {
   const s = state;
   $("svc-pill").textContent = "service: " + s.service;
   $("svc-pill").className = "pill " + (s.service === "running" ? "good" : s.service === "not installed" ? "" : "bad");
-  $("admin-pill").textContent = s.elevated ? "administrator" : "standard user";
-  $("admin-pill").className = "pill " + (s.elevated ? "good" : "");
+  $("admin-pill").textContent = s.elevated ? "administrator" : "standard user ▾";
+  $("admin-pill").className = "pill pill-btn " + (s.elevated ? "good" : "");
+  $("admin-pill").disabled = s.elevated;
   document.querySelectorAll(".needs-admin").forEach((e) => e.classList.toggle("hidden", s.elevated));
   document.querySelectorAll(".admin-only-block").forEach((e) => e.classList.toggle("hidden", !s.elevated));
   document.querySelectorAll(".admin-only").forEach((e) => (e.disabled = !s.elevated));

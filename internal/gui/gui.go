@@ -30,6 +30,7 @@ import (
 	"securdp/internal/logx"
 	"securdp/internal/server"
 	"securdp/internal/service"
+	"securdp/internal/tray"
 	"securdp/internal/winutil"
 )
 
@@ -112,6 +113,7 @@ func Run(opt Options) error {
 		return nil
 	}
 	defer w.Destroy()
+	go tray.ServeShowRequests(uintptr(w.Window())) // tray / second launch -> focus this window
 	go func() { <-a.quit; w.Dispatch(w.Terminate) }()
 	w.Navigate(url)
 	w.Run()

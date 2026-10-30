@@ -50,6 +50,9 @@ func HideOwnConsole() {
 	}
 }
 
+// Run executes a console tool without flashing a window.
+func Run(name string, args ...string) (string, error) { return run(name, args...) }
+
 func run(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -210,7 +211,59 @@ func Install() error {
 	if err := winutil.ApplyFirewall(dst, cfg.ListenPort, cfg.BlockDirectRDP, winutil.GetRDPInfo().Port); err != nil {
 		return err
 	}
-	return s.Start()
+	if err := s.Start(); err != nil {
+		return err
+	}
+	// Tray icon is a convenience: failing to register it must not fail install.
+	installTrayTask(dst)
+	return nil
+}
+
+const trayTask = "SecuRDP Tray"
+
+// installTrayTask registers a scheduled task that starts the tray icon (not
+// elevated) for every user at sign-in, then starts it now in the current
+// session. A scheduled task is used because an elevated installer can't
+// otherwise launch a non-elevated process.
+func installTrayTask(exe string) {
+	// securdp.exe is a console program; headless conhost runs it without
+	// flashing a console window at every sign-in.
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		sysRoot = `C:\Windows`
+	}
+	conhost := filepath.Join(sysRoot, "System32", "conhost.exe")
+	xml :=`<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Shows the SecuRDP icon in the notification area.</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Users"><GroupId>S-1-5-32-545</GroupId><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Users"><Exec><Command>` + conhost + `</Command><Arguments>--headless "` + exe + `" tray</Arguments></Exec></Actions>
+</Task>`
+	f, err := os.CreateTemp("", "securdp-task-*.xml")
+	if err != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	f.Write([]byte{0xFF, 0xFE}) // UTF-16 LE BOM, as the XML declares
+	for _, u := range utf16.Encode([]rune(xml)) {
+		f.Write([]byte{byte(u), byte(u >> 8)})
+	}
+	f.Close()
+	winutil.Run("schtasks", "/create", "/tn", trayTask, "/xml", f.Name(), "/f")
+	winutil.Run("schtasks", "/run", "/tn", trayTask)
+}
+
+func removeTrayTask() {
+	// Running tray icons notice the service is gone and remove themselves.
+	winutil.Run("schtasks", "/delete", "/tn", trayTask, "/f")
 }
 
 func Uninstall() error {
@@ -232,6 +285,7 @@ func Uninstall() error {
 		s.Close()
 	}
 	winutil.RemoveFirewall()
+	removeTrayTask()
 	return nil
 }
 

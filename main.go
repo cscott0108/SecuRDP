@@ -11,15 +11,17 @@ import (
 	"securdp/internal/config"
 	"securdp/internal/gui"
 	"securdp/internal/service"
+	"securdp/internal/tray"
 	"securdp/internal/winutil"
 )
 
-const version = "1.1.1"
+const version = "1.2.1"
 
 const usage = `SecuRDP ` + version + `
 
   securdp                      open the SecuRDP window (setup + connect)
   securdp gui --browser        open the UI in your web browser instead
+  securdp tray                 show the notification-area icon (server PCs)
   securdp connect <profile>    connect a saved profile from the terminal
   securdp connect <host> <port> <username>
   securdp install              install/update the gatekeeper service (admin)
@@ -50,8 +52,20 @@ func main() {
 		}
 		if !opt.Browser && !opt.NoOpen {
 			winutil.HideOwnConsole()
+			// One window per user: focus the open one instead. (Skipped when
+			// elevated, so "Restart as administrator" isn't swallowed by the
+			// window it is replacing.)
+			if !winutil.IsElevated() && tray.FocusExistingWindow() {
+				return
+			}
+		}
+		if !winutil.IsElevated() {
+			tray.StartIfNeeded()
 		}
 		err = gui.Run(opt)
+	case "tray":
+		winutil.HideOwnConsole()
+		err = tray.Run()
 	case "connect":
 		config.MigrateClientDir()
 		err = connect(args[1:])

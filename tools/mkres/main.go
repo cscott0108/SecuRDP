@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version   = "1.1.1"
+	version   = "1.2.1"
 	rtIcon    = 3
 	rtGroup   = 14
 	rtVersion = 16

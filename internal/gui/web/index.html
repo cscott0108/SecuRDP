@@ -13,7 +13,13 @@
   <div class="hdr-right">
     <button id="ip-pill" class="pill pill-btn" title="This network's public IP - click to copy">public IP: …</button>
     <span id="svc-pill" class="pill">service: …</span>
-    <span id="admin-pill" class="pill"></span>
+    <div class="pill-menu">
+      <button id="admin-pill" class="pill pill-btn" aria-haspopup="menu" aria-expanded="false"></button>
+      <div id="admin-menu" class="menu hidden" role="menu">
+        <button id="admin-elevate" role="menuitem">Restart as administrator</button>
+        <p class="muted small">Needed for server settings, users, the service and the log. Windows will ask for permission.</p>
+      </div>
+    </div>
   </div>
 </header>
 
