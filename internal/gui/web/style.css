@@ -52,6 +52,13 @@ button.danger { color: var(--bad); }
   border: 1px solid var(--border); border-radius: 8px; padding: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
 .menu button { width: 100%; text-align: left; }
 .menu p { margin: 8px 2px 0; }
+.pick-list { display: grid; gap: 8px; margin: 12px 0; }
+.pick { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; }
+.pick.is-default { border-color: var(--accent); }
+.pick-name { font-weight: 600; flex: 1; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.dot.on { background: var(--good); }
+.dot.off { background: var(--muted); opacity: .6; }
 .roles { display: grid; gap: 8px; }
 .role { flex-direction: row; align-items: flex-start; gap: 10px; font-weight: 400; padding: 10px 12px;
   border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }

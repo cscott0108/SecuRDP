@@ -22,7 +22,7 @@ import (
 // (e.g. the Android app's JVM tests). Skipped unless SECURDP_SERVE_ADDR is set.
 //
 //	user: probe.user  password: Test-passphrase-123  TOTP secret: JBSWY3DPEHPK3PXP
-//	RDP target: an echo server.
+//	hub computers: desktop (default, echo) and laptop (greets "laptop;" then echoes).
 func TestServeForExternalClient(t *testing.T) {
 	addr := os.Getenv("SECURDP_SERVE_ADDR")
 	if addr == "" {
@@ -51,8 +51,17 @@ func TestServeForExternalClient(t *testing.T) {
 	}
 	hash, _ := auth.HashPassword("Test-passphrase-123")
 	cfg := config.DefaultServer()
-	cfg.RDPTarget = echo.Addr().String()
-	cfg.Users = []config.User{{Username: "probe.user", PasswordHash: hash, TOTPSecret: enc, Enabled: true}}
+	// A hub: "desktop" (default) is a plain echo, "laptop" greets with "laptop;".
+	cfg.Mode = "hub"
+	cfg.Computers = []config.Computer{
+		{Name: "desktop", Address: echo.Addr().String()},
+		{Name: "laptop", Address: namedRDP(t, "laptop")},
+	}
+	// Two users with the same secret, so tests in any order don't trip replay protection.
+	cfg.Users = []config.User{
+		{Username: "probe.user", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
+		{Username: "probe.two", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
+	}
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(priv)

@@ -43,7 +43,8 @@ type app struct {
 
 	mu      sync.Mutex
 	pending map[string]pendingUser
-	tunnels map[string]*client.Tunnel // by profile name
+	tunnels  map[string]*client.Tunnel // by profile name
+	choosing map[string]*client.Tunnel // logged in, waiting for a picker choice
 	quit    chan struct{}
 	pubIP   publicIP
 }
@@ -65,7 +66,8 @@ type Options struct{ Browser, NoOpen bool }
 
 // Run starts the UI and blocks until the window is closed.
 func Run(opt Options) error {
-	a := &app{token: randHex(32), pending: map[string]pendingUser{}, tunnels: map[string]*client.Tunnel{}, quit: make(chan struct{})}
+	a := &app{token: randHex(32), pending: map[string]pendingUser{}, tunnels: map[string]*client.Tunnel{},
+		choosing: map[string]*client.Tunnel{}, quit: make(chan struct{})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -124,6 +126,9 @@ func (a *app) closeTunnels() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, t := range a.tunnels {
+		t.Close()
+	}
+	for _, t := range a.choosing {
 		t.Close()
 	}
 }
@@ -241,6 +246,7 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/profiles/save", false, a.saveProfile)
 	a.api(mux, "/api/profiles/delete", false, a.deleteProfile)
 	a.api(mux, "/api/connect", false, a.connect)
+	a.api(mux, "/api/connect/choose", false, a.choose)
 	a.api(mux, "/api/disconnect", false, a.disconnect)
 
 	return a.guard(mux)
@@ -303,6 +309,9 @@ func (a *app) state(*http.Request) (any, error) {
 			delete(a.tunnels, n)
 		default:
 			conn[n] = t.LocalAddr
+			if t.Computer != "" {
+				conn[n] += " → " + t.Computer
+			}
 		}
 	}
 	a.mu.Unlock()
@@ -510,14 +519,14 @@ func (a *app) saveProfile(r *http.Request) (any, error) {
 		} else {
 			p.HostFingerprint = ex.HostFingerprint
 		}
-		p.LocalIP = ex.LocalIP
+		p.LocalIP, p.ComputerIPs = ex.LocalIP, ex.ComputerIPs
 		cc.AssignLocalIP(&p)
 		*ex = p
 	} else {
 		if cc.Find(p.Name) != nil {
 			return nil, errors.New("a profile with that name already exists")
 		}
-		p.HostFingerprint, p.LocalIP = "", ""
+		p.HostFingerprint, p.LocalIP, p.ComputerIPs = "", "", nil
 		cc.AssignLocalIP(&p)
 		cc.Profiles = append(cc.Profiles, p)
 	}
@@ -576,7 +585,7 @@ func (a *app) connect(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	t, err := client.Dial(*p, in.Password, in.Code)
+	t, err := client.Connect(*p, in.Password, in.Code)
 	var uh *client.UnknownHostError
 	if errors.As(err, &uh) {
 		return map[string]string{"status": "verify_host", "fingerprint": uh.Fingerprint}, nil
@@ -584,14 +593,88 @@ func (a *app) connect(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// A hub with several computers: use the profile's saved choice, or ask.
+	list, _ := t.Computers()
+	if len(list) > 1 {
+		for _, c := range list {
+			if c.Name == p.Computer {
+				return a.startForward(in.Name, t, c.Name, false)
+			}
+		}
+		a.mu.Lock()
+		if old := a.choosing[in.Name]; old != nil {
+			old.Close()
+		}
+		a.choosing[in.Name] = t
+		a.mu.Unlock()
+		// Don't hold a logged-in tunnel forever if the picker is abandoned.
+		time.AfterFunc(3*time.Minute, func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if a.choosing[in.Name] == t {
+				delete(a.choosing, in.Name)
+				t.Close()
+			}
+		})
+		return map[string]any{"status": "choose", "computers": list}, nil
+	}
+	return a.startForward(in.Name, t, "", false)
+}
+
+// choose finishes a picker connect: forward to the chosen hub computer.
+func (a *app) choose(r *http.Request) (any, error) {
+	in, err := decode[struct {
+		Name, Computer string
+		Remember       bool
+	}](r)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	t := a.choosing[in.Name]
+	delete(a.choosing, in.Name)
+	a.mu.Unlock()
+	if t == nil {
+		return nil, errors.New("the login expired - connect again")
+	}
+	if in.Computer == "" {
+		t.Close() // picker cancelled
+		return nil, nil
+	}
+	return a.startForward(in.Name, t, in.Computer, in.Remember)
+}
+
+// startForward listens locally for computer ("" = the login's computer) on
+// that PC's own loopback address and launches Remote Desktop.
+func (a *app) startForward(name string, t *client.Tunnel, computer string, remember bool) (any, error) {
+	cc, err := config.LoadClient()
+	if err != nil {
+		t.Close()
+		return nil, err
+	}
+	p := cc.Find(name)
+	if p == nil {
+		t.Close()
+		return nil, errors.New("profile not found")
+	}
+	ip := cc.ComputerIP(p, computer)
+	if remember {
+		p.Computer = computer
+	}
+	config.SaveClient(cc)
+	if err := t.Listen(computer, ip); err != nil {
+		t.Close()
+		return nil, err
+	}
 	if err := t.LaunchRDP(); err != nil {
 		t.Close()
 		return nil, err
 	}
 	a.mu.Lock()
-	a.tunnels[in.Name] = t
+	a.tunnels[name] = t
 	a.mu.Unlock()
-	return map[string]string{"status": "connected", "local": t.LocalAddr}, nil
+	return map[string]string{"status": "connected", "local": t.LocalAddr, "computer": computer}, nil
 }
 
 func (a *app) disconnect(r *http.Request) (any, error) {

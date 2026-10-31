@@ -37,7 +37,11 @@ func (t *Tunnel) writeRDPFile() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, unsafeName.ReplaceAllString(p.Name, "_")+".rdp")
+	name := p.Name
+	if t.Computer != "" {
+		name += " - " + t.Computer
+	}
+	path := filepath.Join(dir, unsafeName.ReplaceAllString(name, "_")+".rdp")
 	// mstsc reads .rdp files as UTF-16 LE with BOM most reliably.
 	return path, os.WriteFile(path, utf16le(strings.Join(lines, "\r\n")+"\r\n"), 0o600)
 }

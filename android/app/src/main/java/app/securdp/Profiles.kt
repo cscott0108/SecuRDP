@@ -14,6 +14,10 @@ data class Profile(
     val hostFingerprint: String = "",
     /** Per-profile loopback port, so Remote Desktop keeps a separate saved login for each PC. */
     val localPort: Int = 0,
+    /** Hub profiles: the PC to use without asking ("" = show the picker). */
+    val computer: String = "",
+    /** Hub profiles: a loopback port per hub PC, for the same reason as [localPort]. */
+    val computerPorts: Map<String, Int> = emptyMap(),
 )
 
 class ProfileStore(context: Context) {
@@ -23,6 +27,7 @@ class ProfileStore(context: Context) {
         val arr = JSONArray(prefs.getString("list", "[]"))
         return (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
+            val ports = o.optJSONObject("computerPorts")
             Profile(
                 name = o.getString("name"),
                 host = o.getString("host"),
@@ -31,6 +36,8 @@ class ProfileStore(context: Context) {
                 rdpUsername = o.optString("rdpUsername"),
                 hostFingerprint = o.optString("hostFingerprint"),
                 localPort = o.optInt("localPort"),
+                computer = o.optString("computer"),
+                computerPorts = ports?.keys()?.asSequence()?.associateWith { ports.getInt(it) } ?: emptyMap(),
             )
         }
     }
@@ -42,10 +49,15 @@ class ProfileStore(context: Context) {
                 put("name", it.name); put("host", it.host); put("port", it.port)
                 put("username", it.username); put("rdpUsername", it.rdpUsername)
                 put("hostFingerprint", it.hostFingerprint); put("localPort", it.localPort)
+                put("computer", it.computer)
+                put("computerPorts", JSONObject(it.computerPorts as Map<*, *>))
             })
         }
         prefs.edit().putString("list", arr.toString()).apply()
     }
+
+    private fun usedPorts(list: List<Profile>): Set<Int> =
+        list.flatMap { listOf(it.localPort) + it.computerPorts.values }.toSet()
 
     /** Adds or replaces (by [original] name). Changing host/port un-pins the server identity. */
     fun upsert(original: String?, p: Profile): String? {
@@ -60,17 +72,21 @@ class ProfileStore(context: Context) {
         if (list.any { it.name == name } && (idx < 0 || list[idx].name != name)) {
             return "A computer with that name already exists"
         }
-        var np = p.copy(name = name, host = host, username = user, rdpUsername = p.rdpUsername.trim())
+        var np = p.copy(
+            name = name, host = host, username = user, rdpUsername = p.rdpUsername.trim(),
+            computer = p.computer.trim().lowercase(),
+        )
         if (idx >= 0) {
             val old = list[idx]
             np = np.copy(
                 hostFingerprint = if (old.host == host && old.port == p.port) old.hostFingerprint else "",
                 localPort = old.localPort,
+                computerPorts = old.computerPorts,
             )
             list[idx] = np
         } else {
-            val used = list.map { it.localPort }.toSet()
-            np = np.copy(hostFingerprint = "", localPort = (13389..13499).first { it !in used })
+            val used = usedPorts(list)
+            np = np.copy(hostFingerprint = "", localPort = (13389..13499).first { it !in used }, computerPorts = emptyMap())
             list += np
         }
         save(list)
@@ -81,4 +97,18 @@ class ProfileStore(context: Context) {
 
     fun pin(name: String, fingerprint: String) =
         save(load().map { if (it.name == name) it.copy(hostFingerprint = fingerprint) else it })
+
+    /** Remembers [computer] as this profile's hub PC ("" = ask each time). */
+    fun setComputer(name: String, computer: String) =
+        save(load().map { if (it.name == name) it.copy(computer = computer) else it })
+
+    /** The loopback port for a hub PC within a profile, assigned on first use. */
+    fun portFor(name: String, computer: String): Int {
+        val list = load()
+        val p = list.firstOrNull { it.name == name } ?: return 13389
+        p.computerPorts[computer]?.let { return it }
+        val port = (13389..13499).first { it !in usedPorts(list) }
+        save(list.map { if (it.name == name) it.copy(computerPorts = it.computerPorts + (computer to port)) else it })
+        return port
+    }
 }

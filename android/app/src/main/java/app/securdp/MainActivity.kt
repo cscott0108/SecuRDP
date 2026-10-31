@@ -25,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -131,7 +132,8 @@ fun MainScreen(store: ProfileStore) {
                 }
             }
             items(profiles, key = { it.name }) { p ->
-                val busy = state is TunnelState.Connecting || state is TunnelState.Connected
+                val busy = state is TunnelState.Connecting || state is TunnelState.Connected ||
+                    state is TunnelState.NeedsChoice
                 ProfileCard(
                     p, busy,
                     onConnect = { connectTo = p },
@@ -192,6 +194,14 @@ fun MainScreen(store: ProfileStore) {
             },
             onCancel = { creds = null; TunnelManager.clearMessage() },
         )
+        is TunnelState.NeedsChoice -> PickerDialog(
+            computers = s.computers,
+            onPick = { name, remember ->
+                if (remember) profiles = store.load().map { if (it.name == s.profile.name) it.copy(computer = name) else it }
+                TunnelManager.choose(context, name, remember)
+            },
+            onCancel = { openWhenConnected = false; TunnelManager.choose(context, null, false) },
+        )
         is TunnelState.Failed -> AlertDialog(
             onDismissRequest = { TunnelManager.clearMessage() },
             confirmButton = { TextButton(onClick = { TunnelManager.clearMessage() }) { Text("OK") } },
@@ -217,7 +227,10 @@ private fun StatusCard(state: TunnelState, context: android.content.Context) {
             colors = CardDefaults.cardColors(containerColor = Good.copy(alpha = 0.15f)),
         ) {
             Column(Modifier.padding(16.dp)) {
-                Text("Connected to ${state.profile.name}", fontWeight = FontWeight.SemiBold, color = Good)
+                Text(
+                    "Connected to ${state.profile.name}" + (state.computer?.let { " → $it" } ?: ""),
+                    fontWeight = FontWeight.SemiBold, color = Good,
+                )
                 Text(
                     if (state.active > 0) "Remote Desktop session active" else "Tunnel open, waiting for Remote Desktop",
                     style = MaterialTheme.typography.bodyMedium,
@@ -245,6 +258,7 @@ private fun ProfileCard(p: Profile, busy: Boolean, onConnect: () -> Unit, onEdit
             Text(p.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(
                 "${p.host}:${p.port} · gate user ${p.username}" +
+                    (if (p.computer.isNotEmpty()) " · always ${p.computer}" else "") +
                     (if (p.rdpUsername.isNotEmpty()) " · Windows user ${p.rdpUsername}" else ""),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -280,6 +294,7 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
     var port by remember { mutableStateOf(initial?.port?.toString() ?: "") }
     var user by remember { mutableStateOf(initial?.username ?: "") }
     var rdpUser by remember { mutableStateOf(initial?.rdpUsername ?: "") }
+    var computer by remember { mutableStateOf(initial?.computer ?: "") }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
@@ -298,6 +313,11 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
                 )
                 OutlinedTextField(user, { user = it }, label = { Text("SecuRDP username") }, singleLine = true)
                 OutlinedTextField(rdpUser, { rdpUser = it }, label = { Text("Windows username (optional)") }, singleLine = true)
+                OutlinedTextField(
+                    computer, { computer = it.lowercase().filter { c -> c.isLetterOrDigit() || c == '-' } },
+                    label = { Text("Hub computer (optional)") }, singleLine = true,
+                    supportingText = { Text("Blank = pick from a list each time") },
+                )
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
@@ -305,7 +325,7 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
             TextButton(onClick = {
                 error = onSave(
                     Profile(name, host, port.toIntOrNull() ?: 0, user, rdpUser,
-                        initial?.hostFingerprint ?: "", initial?.localPort ?: 0),
+                        initial?.hostFingerprint ?: "", initial?.localPort ?: 0, computer),
                 )
             }) { Text("Save") }
         },
@@ -340,6 +360,36 @@ private fun ConnectDialog(profile: Profile, onConnect: (String, String) -> Unit,
         },
         confirmButton = { TextButton(onClick = { onConnect(password, code) }, enabled = ready) { Text("Connect") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun PickerDialog(computers: List<HubComputer>, onPick: (String, Boolean) -> Unit, onCancel: () -> Unit) {
+    var keep by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Which computer?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                computers.forEach { c ->
+                    OutlinedButton(onClick = { onPick(c.name, keep) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("●", color = if (c.online) Good else MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(10.dp))
+                        Text(c.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text(
+                            (if (c.online) "online" else "not answering") + (if (c.isDefault) " · default" else ""),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = keep, onCheckedChange = { keep = it })
+                    Text("Always use this computer for this entry", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
 }
 

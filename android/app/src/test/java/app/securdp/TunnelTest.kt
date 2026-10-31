@@ -95,6 +95,46 @@ class TunnelTest {
         assertEquals(0, lastActive)
     }
 
+    /** Hub picker: one login, list the computers, forward to the chosen one. */
+    @Test
+    fun pickerListAndChooseAgainstTestGate() {
+        val e2ePort: Int = System.getProperty("securdp.e2e.port")?.toInt()
+            ?: run { assumeTrue("set -Dsecurdp.e2e.port", false); return }
+        val pinned = try {
+            Tunnel("127.0.0.1", e2ePort, "probe.two", "", 0, noop).connect("x", "000000")
+            error("expected UnknownHostException")
+        } catch (e: UnknownHostException) {
+            e.fingerprint
+        }
+        val t = Tunnel("127.0.0.1", e2ePort, "probe.two", pinned, 0, noop)
+        t.connect("Test-passphrase-123", totp("JBSWY3DPEHPK3PXP"))
+        try {
+            val list = t.computers()
+            assertEquals(listOf("desktop", "laptop"), list.map { it.name })
+            assert(list.all { it.online }) { "both test PCs should answer: $list" }
+            assert(list.first { it.name == "desktop" }.isDefault)
+
+            t.listen("laptop", 13451)
+            Socket("127.0.0.1", 13451).use { s ->
+                s.soTimeout = 5_000
+                val buf = ByteArray(7)
+                var n = 0
+                while (n < 7) n += s.getInputStream().read(buf, n, 7 - n)
+                assertEquals("laptop;", String(buf))
+            }
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test
+    fun parsesComputerList() {
+        assertEquals(
+            listOf(HubComputer("desktop", true, true), HubComputer("laptop", false, false)),
+            parseComputers("desktop 1 1\nlaptop 0 0\n\ngarbage\n"),
+        )
+    }
+
     private fun totp(secret: String): String {
         val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
         var bits = 0L; var nbits = 0

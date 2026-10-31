@@ -36,6 +36,7 @@ func (e *HostChangedError) Error() string {
 
 type Tunnel struct {
 	LocalAddr string
+	Computer  string // hub computer being forwarded to ("" = the login's)
 	profile   config.Profile
 	ssh       *ssh.Client
 	ln        net.Listener
@@ -45,8 +46,9 @@ type Tunnel struct {
 	done      chan struct{}
 }
 
-// Dial authenticates to the gatekeeper and starts a local listener.
-func Dial(p config.Profile, password, code string) (*Tunnel, error) {
+// Connect authenticates to the gate. Call Listen (after Computers, for a
+// picker) to start forwarding.
+func Connect(p config.Profile, password, code string) (*Tunnel, error) {
 	cfg := &ssh.ClientConfig{
 		Config: ssh.Config{
 			KeyExchanges: []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519},
@@ -95,29 +97,98 @@ func Dial(p config.Profile, password, code string) (*Tunnel, error) {
 		return nil, err
 	}
 
-	// A stable per-profile address keeps Remote Desktop's saved login working.
-	ip := p.LocalIP
-	if ip == "" {
-		ip = "127.0.0.1"
-	}
-	var ln net.Listener
-	for port := 13389; port < 13400 && ln == nil; port++ {
-		ln, _ = net.Listen("tcp", fmt.Sprintf("%s:%d", ip, port))
-	}
-	if ln == nil {
-		if ln, err = net.Listen("tcp", ip+":0"); err != nil {
-			c.Close()
-			return nil, err
-		}
-	}
-	t := &Tunnel{LocalAddr: ln.Addr().String(), profile: p, ssh: c, ln: ln, done: make(chan struct{})}
-	go t.accept()
+	t := &Tunnel{profile: p, ssh: c, done: make(chan struct{})}
 	go t.keepalive()
 	go func() { c.Wait(); t.Close() }()
 	return t, nil
 }
 
+// Dial logs in and starts forwarding to the login's computer (the
+// "user+computer" suffix, or the hub default), as before the picker existed.
+func Dial(p config.Profile, password, code string) (*Tunnel, error) {
+	t, err := Connect(p, password, code)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Listen("", p.LocalIP); err != nil {
+		t.Close()
+		return nil, err
+	}
+	return t, nil
+}
+
+// HubComputer is one entry of a hub's computer list.
+type HubComputer struct {
+	Name    string `json:"name"`
+	Online  bool   `json:"online"`
+	Default bool   `json:"default"`
+}
+
+// Computers asks the gate which computers this login may reach. Older gates
+// don't support this; they yield (nil, nil) after a short wait.
+func (t *Tunnel) Computers() ([]HubComputer, error) {
+	type result struct {
+		list []HubComputer
+		err  error
+	}
+	res := make(chan result, 1)
+	go func() {
+		ch, err := t.ssh.Dial("tcp", "list.securdp:0")
+		if err != nil {
+			res <- result{nil, err}
+			return
+		}
+		defer ch.Close()
+		b, err := io.ReadAll(io.LimitReader(ch, 64<<10))
+		if err != nil {
+			res <- result{nil, err}
+			return
+		}
+		var list []HubComputer
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 3 {
+				list = append(list, HubComputer{f[0], f[1] == "1", f[2] == "1"})
+			}
+		}
+		res <- result{list, nil}
+	}()
+	select {
+	case r := <-res:
+		return r.list, r.err
+	case <-time.After(4 * time.Second):
+		return nil, nil // an older gate forwards this to RDP, which never answers first
+	}
+}
+
+// Listen starts the local listener for computer ("" = the login's computer)
+// on a stable loopback address, so Remote Desktop's saved login sticks.
+func (t *Tunnel) Listen(computer, localIP string) error {
+	if localIP == "" {
+		localIP = "127.0.0.1"
+	}
+	var ln net.Listener
+	var err error
+	for port := 13389; port < 13400 && ln == nil; port++ {
+		ln, _ = net.Listen("tcp", fmt.Sprintf("%s:%d", localIP, port))
+	}
+	if ln == nil {
+		if ln, err = net.Listen("tcp", localIP+":0"); err != nil {
+			return err
+		}
+	}
+	t.ln, t.Computer, t.LocalAddr = ln, computer, ln.Addr().String()
+	go t.accept()
+	return nil
+}
+
 func (t *Tunnel) accept() {
+	// A computer name asks the hub for that PC; 127.0.0.1 means "the
+	// computer I logged in to" (and is what older gates expect).
+	dest := "127.0.0.1:3389"
+	if t.Computer != "" {
+		dest = t.Computer + ":3389"
+	}
 	for {
 		lc, err := t.ln.Accept()
 		if err != nil {
@@ -125,7 +196,7 @@ func (t *Tunnel) accept() {
 		}
 		go func() {
 			defer lc.Close()
-			rc, err := t.ssh.Dial("tcp", "127.0.0.1:3389") // server always maps to its RDP port
+			rc, err := t.ssh.Dial("tcp", dest)
 			if err != nil {
 				return
 			}
@@ -163,7 +234,9 @@ func (t *Tunnel) Done() <-chan struct{} { return t.done }
 
 func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
-		t.ln.Close()
+		if t.ln != nil {
+			t.ln.Close()
+		}
 		t.ssh.Close()
 		close(t.done)
 	})

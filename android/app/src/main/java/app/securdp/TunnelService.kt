@@ -21,8 +21,11 @@ import kotlin.concurrent.thread
 sealed interface TunnelState {
     data object Idle : TunnelState
     data class Connecting(val profile: Profile) : TunnelState
-    data class Connected(val profile: Profile, val active: Int) : TunnelState
+    /** [profile].localPort is the port actually in use (per hub PC). */
+    data class Connected(val profile: Profile, val active: Int, val computer: String? = null) : TunnelState
     data class NeedsTrust(val profile: Profile, val fingerprint: String) : TunnelState
+    /** Logged in to a hub with several PCs: the user picks one. */
+    data class NeedsChoice(val profile: Profile, val computers: List<HubComputer>) : TunnelState
     data class Failed(val message: String) : TunnelState
 }
 
@@ -49,6 +52,14 @@ object TunnelManager {
         tunnel?.close("Disconnected")
     }
 
+    /** Answers the hub picker; null computer cancels (and logs out). */
+    fun choose(context: Context, computer: String?, remember: Boolean) {
+        context.startService(
+            Intent(context, TunnelService::class.java).setAction(TunnelService.ACTION_CHOOSE)
+                .putExtra("computer", computer).putExtra("remember", remember),
+        )
+    }
+
     fun clearMessage() {
         if (_state.value is TunnelState.Failed || _state.value is TunnelState.NeedsTrust) set(TunnelState.Idle)
     }
@@ -58,6 +69,7 @@ class TunnelService : Service() {
     companion object {
         const val ACTION_START = "app.securdp.START"
         const val ACTION_STOP = "app.securdp.STOP"
+        const val ACTION_CHOOSE = "app.securdp.CHOOSE"
         private const val CHANNEL = "tunnel"
         private const val NOTIF_ID = 1
     }
@@ -71,13 +83,22 @@ class TunnelService : Service() {
                 stopSelfSafely()
             }
             ACTION_START -> start()
+            ACTION_CHOOSE -> choose(intent.getStringExtra("computer"), intent.getBooleanExtra("remember", false))
         }
         return START_NOT_STICKY
     }
 
+    // The profile as forwarded (localPort = the port in use) and its hub PC.
+    @Volatile private var current: Profile? = null
+    @Volatile private var computer: String? = null
+
+    private fun label(p: Profile) = p.name + (computer?.let { " → $it" } ?: "")
+
     private fun start() {
         val (profile, password, code) = TunnelManager.pending ?: return stopSelfSafely()
         TunnelManager.pending = null
+        current = null
+        computer = null
         goForeground(notification("Connecting to ${profile.name}…", profile))
 
         thread(name = "securdp-connect") {
@@ -86,30 +107,71 @@ class TunnelService : Service() {
                 pinnedFingerprint = profile.hostFingerprint, localPort = profile.localPort,
                 listener = object : Tunnel.Listener {
                     override fun onActiveChanged(active: Int) {
-                        TunnelManager.set(TunnelState.Connected(profile, active))
+                        val p = current ?: profile
+                        TunnelManager.set(TunnelState.Connected(p, active, computer))
                         val what = if (active > 0) "Remote Desktop connected" else "Tunnel open - waiting for Remote Desktop"
-                        updateNotification(notification("$what · ${profile.name}", profile))
+                        updateNotification(notification("$what · ${label(p)}", p))
                     }
 
                     override fun onClosed(reason: String) {
                         TunnelManager.tunnel = null
+                        current = null
                         TunnelManager.set(if (reason == "Disconnected") TunnelState.Idle else TunnelState.Failed(reason))
                         stopSelfSafely()
                     }
                 },
             )
             try {
-                t.open(password, code)
+                t.connect(password, code)
                 TunnelManager.tunnel = t
-                TunnelManager.set(TunnelState.Connected(profile, 0))
-                updateNotification(notification("Tunnel open - waiting for Remote Desktop · ${profile.name}", profile))
-                // The visible activity opens Remote Desktop (Android blocks activity starts from services).
+                val list = t.computers()
+                if (list.size > 1) {
+                    val saved = list.firstOrNull { it.name == profile.computer }
+                    if (saved != null) {
+                        forwardTo(t, profile, saved.name)
+                    } else {
+                        TunnelManager.set(TunnelState.NeedsChoice(profile, list))
+                        updateNotification(notification("Choose a computer · ${profile.name}", profile))
+                    }
+                } else {
+                    forwardTo(t, profile, null)
+                }
             } catch (e: UnknownHostException) {
                 TunnelManager.set(TunnelState.NeedsTrust(profile, e.fingerprint))
                 stopSelfSafely()
             } catch (e: Exception) {
                 TunnelManager.set(TunnelState.Failed(e.message ?: e.toString()))
                 stopSelfSafely()
+            }
+        }
+    }
+
+    /** Starts forwarding to [name] (null = the login's computer) on its own local port. */
+    private fun forwardTo(t: Tunnel, profile: Profile, name: String?) {
+        val port = if (name == null) profile.localPort else ProfileStore(this).portFor(profile.name, name)
+        t.listen(name, port)
+        val p = profile.copy(localPort = port)
+        current = p
+        computer = name
+        TunnelManager.set(TunnelState.Connected(p, 0, name))
+        updateNotification(notification("Tunnel open - waiting for Remote Desktop · ${label(p)}", p))
+        // The visible activity opens Remote Desktop (Android blocks activity starts from services).
+    }
+
+    private fun choose(name: String?, remember: Boolean) {
+        val t = TunnelManager.tunnel ?: return
+        val st = TunnelManager.state.value as? TunnelState.NeedsChoice ?: return
+        if (name == null) {
+            t.close("Disconnected")
+            return
+        }
+        if (remember) ProfileStore(this).setComputer(st.profile.name, name)
+        thread(name = "securdp-choose") {
+            try {
+                forwardTo(t, st.profile, name)
+            } catch (e: Exception) {
+                TunnelManager.set(TunnelState.Failed(e.message ?: e.toString()))
+                t.close(e.message ?: "Failed")
             }
         }
     }

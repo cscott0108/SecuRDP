@@ -355,8 +355,85 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 			nc.Reject(ssh.Prohibited, "only RDP forwarding is permitted")
 			continue
 		}
-		go s.forward(nc, tr, computer)
+		// The requested host may name a hub computer (picker clients) or the
+		// special list address; anything else means the login's computer.
+		var d struct {
+			Host     string
+			Port     uint32
+			OrigHost string
+			OrigPort uint32
+		}
+		ssh.Unmarshal(nc.ExtraData(), &d)
+		host := strings.ToLower(d.Host)
+		if host == listHost {
+			go s.sendComputerList(nc, user, computer)
+			continue
+		}
+		target := computer
+		if host != computer && s.config().FindComputer(host) != nil {
+			u := s.config().FindUser(user)
+			if u == nil || !u.CanReach(host) {
+				nc.Reject(ssh.Prohibited, "you may not reach that computer")
+				s.log.Printf("REJECT %s user=%s: may not reach %q", ip, user, host)
+				continue
+			}
+			target = host
+			s.log.Printf("OPEN %s user=%s computer=%s", ip, user, target)
+		}
+		go s.forward(nc, tr, target)
 	}
+}
+
+// listHost is the pseudo destination a client opens to get its computer list.
+const listHost = "list.securdp"
+
+// sendComputerList writes the computers this user may reach, one per line:
+// "name online(0/1) default(0/1)". Online means Remote Desktop answered just now.
+func (s *Server) sendComputerList(nc ssh.NewChannel, user, loginComputer string) {
+	ch, reqs, err := nc.Accept()
+	if err != nil {
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	defer ch.Close()
+	cfg := s.config()
+	u := cfg.FindUser(user)
+	if u == nil {
+		return
+	}
+	var comps []config.Computer
+	for _, c := range cfg.ActiveComputers() {
+		if u.CanReach(c.Name) {
+			comps = append(comps, c)
+		}
+	}
+	online := make([]bool, len(comps))
+	var wg sync.WaitGroup
+	for i, c := range comps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if addr, _ := s.rdpTarget(c.Name); addr != "" {
+				if conn, err := net.DialTimeout("tcp", addr, 800*time.Millisecond); err == nil {
+					conn.Close()
+					online[i] = true
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	var b strings.Builder
+	for i, c := range comps {
+		fmt.Fprintf(&b, "%s %d %d\n", c.Name, b2i(online[i]), b2i(c.Name == loginComputer))
+	}
+	io.WriteString(ch, b.String())
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // tracker counts open RDP connections in one tunnel and fires onIdle after

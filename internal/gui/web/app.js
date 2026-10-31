@@ -515,7 +515,7 @@ function renderProfiles() {
           el("div", {},
             el("b", {}, p.name), " ",
             local ? el("span", { class: "pill good" }, "connected") : "",
-            el("div", { class: "muted small" }, `${p.host}:${p.port} · gate user ${p.username}` + (p.rdp_username ? ` · Windows user ${p.rdp_username}` : "") + (p.host_fingerprint ? " · identity verified" : " · not yet verified"))
+            el("div", { class: "muted small" }, `${p.host}:${p.port} · gate user ${p.username}` + (p.computer ? ` · always ${p.computer}` : "") + (p.rdp_username ? ` · Windows user ${p.rdp_username}` : "") + (p.host_fingerprint ? " · identity verified" : " · not yet verified"))
           ),
           el("div", { class: "actions tight" },
             local
@@ -543,9 +543,45 @@ async function connect(name, password, code, trust) {
     $("fp-modal").classList.remove("hidden");
     return;
   }
+  if (r.status === "choose") {
+    showPicker(name, r.computers);
+    return;
+  }
   toast("Connected. Remote Desktop is opening…");
   await refresh();
 }
+
+// Hub picker: the hub sent the computers this login may reach.
+let pickerFor = null;
+function showPicker(name, computers) {
+  pickerFor = name;
+  $("pick-remember").checked = false;
+  const box = $("pick-list");
+  box.innerHTML = "";
+  for (const c of computers) {
+    box.append(el("button", {
+      class: "pick" + (c.default ? " is-default" : ""),
+      onclick: (e) => run(e.target, async () => {
+        $("pick-modal").classList.add("hidden");
+        pickerFor = null;
+        await api("connect/choose", { name, computer: c.name, remember: $("pick-remember").checked });
+        toast(c.online ? `Connected to ${c.name}. Remote Desktop is opening…`
+          : `Connecting to ${c.name} - it didn't answer just now; if it's asleep the hub is waking it, so retry in a minute if Remote Desktop can't reach it.`);
+        await refresh();
+      }),
+    },
+      el("span", { class: "dot " + (c.online ? "on" : "off") }),
+      el("span", { class: "pick-name" }, c.name),
+      el("span", { class: "muted small" }, (c.online ? "online" : "not answering") + (c.default ? " · default" : ""))
+    ));
+  }
+  $("pick-modal").classList.remove("hidden");
+}
+$("pick-cancel").addEventListener("click", () => run(null, async () => {
+  $("pick-modal").classList.add("hidden");
+  if (pickerFor) await api("connect/choose", { name: pickerFor, computer: "" });
+  pickerFor = null;
+}));
 
 $("fp-yes").addEventListener("click", (e) =>
   run(e.target, async () => {
@@ -567,6 +603,7 @@ function editProfile(p) {
   $("pf-user").value = p ? p.username : "";
   $("pf-rdpuser").value = p ? p.rdp_username || "" : "";
   $("pf-full").checked = p ? p.rdp_fullscreen : false;
+  $("pf-computer").value = p ? p.computer || "" : "";
   $("pf-name").focus();
 }
 $("add-profile").addEventListener("click", () => editProfile(null));
@@ -578,6 +615,7 @@ $("pf-save").addEventListener("click", (e) =>
       profile: {
         name: $("pf-name").value, host: $("pf-host").value, port: +$("pf-port").value,
         username: $("pf-user").value, rdp_username: $("pf-rdpuser").value, rdp_fullscreen: $("pf-full").checked,
+        computer: $("pf-computer").value.trim().toLowerCase(),
       },
     });
     $("profile-form").classList.add("hidden");

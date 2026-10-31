@@ -103,7 +103,8 @@ client ──SSH──► router :port ──► hub (SecuRDP) ──► desktop
 ```
 
 - **Computers tab:** add each PC with a name, its home-network address and, optionally, its MAC address for Wake-on-LAN. **Test** checks that Remote Desktop answers. Only these addresses can ever be reached through the hub.
-- **Picking a PC:** log in as `username+name`, e.g. `alex+desktop`. No `+name` goes to the default computer. Existing Windows and Android clients work unchanged: save one profile per PC with the matching username.
+- **Picking a PC:** connect with your plain username, and the Windows and Android apps (1.4+) show a list of the computers you may reach, with green dots for those answering right now. Tick *Always use this computer* to skip the list for that saved entry, or set *Hub computer* under Edit. Each PC gets its own local tunnel address, so Remote Desktop's saved logins stay separate.
+- **Without the picker:** log in as `username+name` (e.g. `alex+desktop`) to go straight to a PC. A plain username in older apps goes to the default computer.
 - **Users tab:** each user can reach *All computers*, or only the ones ticked.
 - **The PCs behind the hub** only need Remote Desktop with NLA, reachable from the hub. The "block RDP from the internet" rule already allows home-network addresses. They don't need SecuRDP installed or a port forward.
 - **Wake-on-LAN:** if a PC with a MAC address doesn't answer at login, the hub sends a wake-up packet. Reconnect after it boots.

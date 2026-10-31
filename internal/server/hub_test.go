@@ -152,6 +152,72 @@ func TestServerModeIgnoresHubComputers(t *testing.T) {
 	}
 }
 
+func TestHubPickerListAndChoose(t *testing.T) {
+	h := startHub(t, func(c *config.Server) {
+		c.Users[0].Restricted = true
+		c.Users[0].Computers = []string{"desktop", "laptop"}
+		c.Computers = append(c.Computers, config.Computer{Name: "offline", Address: "127.0.0.1:1"})
+	})
+	p := config.Profile{Host: "127.0.0.1", Port: h.port, Username: "blue.falcon", HostFingerprint: h.fp}
+	tun, err := client.Connect(p, "Test-passphrase-123", auth.CurrentTOTP(h.secret, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tun.Close()
+
+	list, err := tun.Computers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]client.HubComputer{}
+	for _, c := range list {
+		got[c.Name] = c
+	}
+	if len(list) != 2 || !got["desktop"].Online || !got["desktop"].Default || !got["laptop"].Online || got["laptop"].Default {
+		t.Fatalf("list should be desktop(default)+laptop, both online, and not offline (not allowed): %+v", list)
+	}
+
+	// One login, pick laptop.
+	if err := tun.Listen("laptop", "127.0.0.91"); err != nil {
+		t.Fatal(err)
+	}
+	if g := readGreeting(t, tun.LocalAddr); g != "laptop" {
+		t.Fatalf("picked laptop, reached %q", g)
+	}
+}
+
+func TestHubPickerRefusesForbiddenComputer(t *testing.T) {
+	h := startHub(t, func(c *config.Server) {
+		c.Users[0].Restricted = true
+		c.Users[0].Computers = []string{"desktop"}
+	})
+	p := config.Profile{Host: "127.0.0.1", Port: h.port, Username: "blue.falcon", HostFingerprint: h.fp}
+	tun, err := client.Connect(p, "Test-passphrase-123", auth.CurrentTOTP(h.secret, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tun.Close()
+	if err := tun.Listen("laptop", "127.0.0.92"); err != nil {
+		t.Fatal(err)
+	}
+	if g := readGreeting(t, tun.LocalAddr); g != "" {
+		t.Fatalf("forbidden computer reached: %q", g)
+	}
+}
+
+func readGreeting(t *testing.T, addr string) string {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 32)
+	n, _ := c.Read(buf)
+	return strings.TrimSuffix(string(buf[:n]), ";")
+}
+
 func TestComputerValidation(t *testing.T) {
 	good := []config.Computer{
 		{Name: "desktop", Address: "192.168.1.50"},

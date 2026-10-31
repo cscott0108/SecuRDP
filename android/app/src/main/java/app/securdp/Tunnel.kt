@@ -34,6 +34,16 @@ class HostChangedException(val want: String, val got: String) :
 class LoginFailedException :
     Exception("Login failed - check username, password and authenticator code. Too many failures block your IP for a while.")
 
+/** One computer from a hub's list. */
+data class HubComputer(val name: String, val online: Boolean, val isDefault: Boolean)
+
+/** Parses the hub's list: one "name online(0/1) default(0/1)" per line. */
+fun parseComputers(text: String): List<HubComputer> =
+    text.lines().mapNotNull { line ->
+        val f = line.trim().split(Regex("\\s+"))
+        if (f.size == 3) HubComputer(f[0], f[1] == "1", f[2] == "1") else null
+    }
+
 /** SHA256 fingerprint in the same format as OpenSSH and the Windows app. */
 fun fingerprint(keyBlob: ByteArray): String =
     "SHA256:" + Base64.getEncoder().withoutPadding()
@@ -123,7 +133,7 @@ class Tunnel(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private var idleTask: ScheduledFuture<*>? = null
 
-    val localAddress: String get() = "127.0.0.1:$localPort"
+    val localAddress: String get() = "127.0.0.1:$boundPort"
 
     companion object {
         init {
@@ -136,8 +146,14 @@ class Tunnel(
         }
     }
 
-    /** Connects and authenticates. Blocking; call off the main thread. */
+    /** Connects, authenticates and forwards to the login's computer. Blocking. */
     fun open(password: String, code: String) {
+        connect(password, code)
+        listen(null, localPort)
+    }
+
+    /** Connects and authenticates only (then [computers] / [listen]). Blocking. */
+    fun connect(password: String, code: String) {
         val keys = PinnedHostKey(pinnedFingerprint)
         val jsch = JSch().apply { hostKeyRepository = keys }
         val s = jsch.getSession(username, host, port)
@@ -167,7 +183,52 @@ class Tunnel(
             throw e
         }
         session = s
+        thread(name = "securdp-watch", isDaemon = true) { watch() }
+        // Also covers a picker that is never answered.
+        scheduleIdle(startMillis)
+    }
 
+    /** Which hub computer connections go to (null = the login's computer). */
+    @Volatile var computer: String? = null
+        private set
+
+    /** The local port Remote Desktop should connect to, once listening. */
+    @Volatile var boundPort: Int = localPort
+        private set
+
+    /**
+     * Asks the gate which computers this login may reach. Older gates don't
+     * support it: they return an empty list after a short wait.
+     */
+    fun computers(): List<HubComputer> {
+        val s = session ?: return emptyList()
+        val pool = Executors.newSingleThreadExecutor()
+        val task = pool.submit<List<HubComputer>> {
+            val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+                setHost("list.securdp")
+                setPort(0)
+            }
+            val input = ch.inputStream
+            ch.connect(5_000)
+            try {
+                parseComputers(input.readBytes().toString(Charsets.UTF_8))
+            } finally {
+                ch.disconnect()
+            }
+        }
+        return try {
+            task.get(4, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+            task.cancel(true)
+            emptyList()
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    /** Starts the loopback listener forwarding to [computer] (null = the login's). */
+    fun listen(computer: String?, localPort: Int) {
+        val s = session ?: throw IllegalStateException("not connected")
         // Built outside apply{}: inside it, `localPort` would be ServerSocket's own (-1).
         val bindAddr = InetSocketAddress(InetAddress.getByName("127.0.0.1"), localPort)
         val ss = try {
@@ -179,9 +240,10 @@ class Tunnel(
             s.disconnect()
             throw Exception("Local port $localPort is busy: ${e.message}")
         }
+        this.computer = computer
+        boundPort = localPort
         server = ss
         thread(name = "securdp-accept", isDaemon = true) { acceptLoop(ss) }
-        thread(name = "securdp-watch", isDaemon = true) { watch() }
         scheduleIdle(startMillis)
     }
 
@@ -226,9 +288,10 @@ class Tunnel(
     private fun forward(sock: Socket) {
         val s = session ?: return sock.close()
         val ch = try {
-            // The server always connects this to its own RDP port.
+            // A computer name asks the hub for that PC; 127.0.0.1 means the
+            // login's computer (what older gates expect).
             (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
-                setHost("127.0.0.1")
+                setHost(computer ?: "127.0.0.1")
                 setPort(3389)
             }
         } catch (_: Exception) {

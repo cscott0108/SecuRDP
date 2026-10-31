@@ -318,25 +318,55 @@ type Profile struct {
 	// LocalIP is a per-profile loopback address (127.0.0.x). Windows saves RDP
 	// credentials per address, so each profile gets its own "Remember me".
 	LocalIP string `json:"local_ip"`
+	// Hub profiles: Computer is the PC to connect to without asking ("" =
+	// show the picker); ComputerIPs gives each hub PC its own loopback
+	// address so Remote Desktop keeps a separate saved login per PC.
+	Computer    string            `json:"computer,omitempty"`
+	ComputerIPs map[string]string `json:"computer_ips,omitempty"`
+}
+
+func (c *Client) usedIPs() map[string]bool {
+	used := map[string]bool{}
+	for _, o := range c.Profiles {
+		used[o.LocalIP] = true
+		for _, ip := range o.ComputerIPs {
+			used[ip] = true
+		}
+	}
+	return used
+}
+
+func freeIP(used map[string]bool) string {
+	for i := 10; i < 250; i++ {
+		if ip := fmt.Sprintf("127.0.0.%d", i); !used[ip] {
+			return ip
+		}
+	}
+	return "127.0.0.1"
 }
 
 // AssignLocalIP gives p a loopback address not used by another profile.
 func (c *Client) AssignLocalIP(p *Profile) {
-	if p.LocalIP != "" {
-		return
+	if p.LocalIP == "" {
+		p.LocalIP = freeIP(c.usedIPs())
 	}
-	used := map[string]bool{}
-	for _, o := range c.Profiles {
-		used[o.LocalIP] = true
+}
+
+// ComputerIP returns (assigning if needed) the loopback address for a hub
+// computer within profile p. The caller saves the client config.
+func (c *Client) ComputerIP(p *Profile, computer string) string {
+	if computer == "" {
+		return p.LocalIP
 	}
-	for i := 10; i < 250; i++ {
-		ip := fmt.Sprintf("127.0.0.%d", i)
-		if !used[ip] {
-			p.LocalIP = ip
-			return
-		}
+	if ip, ok := p.ComputerIPs[computer]; ok {
+		return ip
 	}
-	p.LocalIP = "127.0.0.1"
+	if p.ComputerIPs == nil {
+		p.ComputerIPs = map[string]string{}
+	}
+	ip := freeIP(c.usedIPs())
+	p.ComputerIPs[computer] = ip
+	return ip
 }
 
 type Client struct {
