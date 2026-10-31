@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -66,6 +67,39 @@ func MigrateLegacy() error {
 		return Install()
 	}
 	return nil
+}
+
+var installedVer struct {
+	sync.Mutex
+	mod time.Time
+	v   string
+}
+
+// InstalledVersion is the version of the copy in Program Files ("" if none),
+// cached until that file changes.
+func InstalledVersion() string {
+	exe := InstalledExe()
+	st, err := os.Stat(exe)
+	if err != nil {
+		return ""
+	}
+	installedVer.Lock()
+	defer installedVer.Unlock()
+	if st.ModTime().Equal(installedVer.mod) {
+		return installedVer.v
+	}
+	out, err := winutil.Run(exe, "version")
+	if err != nil {
+		return ""
+	}
+	installedVer.mod, installedVer.v = st.ModTime(), strings.TrimSpace(out)
+	return installedVer.v
+}
+
+// RunningInstalledCopy reports whether this process is the Program Files copy.
+func RunningInstalledCopy() bool {
+	self, err := os.Executable()
+	return err == nil && strings.EqualFold(filepath.Clean(self), filepath.Clean(InstalledExe()))
 }
 
 func IsServiceProcess() bool {

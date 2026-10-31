@@ -9,7 +9,7 @@
 </head>
 <body>
 <header>
-  <div class="brand"><img class="logo" src="icon.png" alt=""> SecuRDP</div>
+  <div class="brand"><img class="logo" src="icon.png" alt=""> SecuRDP <span id="app-version" class="ver"></span></div>
   <div class="hdr-right">
     <button id="ip-pill" class="pill pill-btn" title="This network's public IP - click to copy">public IP: …</button>
     <span id="svc-pill" class="pill">service: …</span>
@@ -104,6 +104,8 @@
   <div class="card admin-only-block">
     <h3>3. Service</h3>
     <p>Status: <b id="svc-status">…</b></p>
+    <p>Installed service: <b id="ver-installed">…</b> &middot; This app: <b id="ver-app">…</b></p>
+    <div id="ver-note" class="ver-note hidden"></div>
     <p class="muted">Installing copies SecuRDP to <code>C:\Program Files\SecuRDP</code>, runs it as a Windows service that starts with the PC, and adds the firewall rule for the gate port. Add a user first.</p>
     <div class="actions">
       <button id="svc-install" class="primary">Install / update service</button>

@@ -31,6 +31,7 @@ import (
 	"securdp/internal/server"
 	"securdp/internal/service"
 	"securdp/internal/tray"
+	"securdp/internal/version"
 	"securdp/internal/winutil"
 )
 
@@ -266,6 +267,10 @@ func (a *app) state(*http.Request) (any, error) {
 		"service":  service.Status(),
 		"rdp":      winutil.GetRDPInfo(),
 		"lan_ips":  lanIPs(),
+		"version":  version.Version,
+		// Lets the UI tell "update available" from "you opened the installed copy".
+		"service_version":  service.InstalledVersion(),
+		"running_installed": service.RunningInstalledCopy(),
 	}
 	ip, checked, ipErr := a.pubIP.get(false)
 	st["public_ip"], st["public_ip_error"] = ip, ipErr

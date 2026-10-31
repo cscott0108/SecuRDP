@@ -14,10 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+
+	ver "securdp/internal/version"
 )
 
+const version = ver.Version
+
 const (
-	version   = "1.4.0"
+
 	rtIcon    = 3
 	rtGroup   = 14
 	rtVersion = 16

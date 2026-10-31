@@ -114,6 +114,7 @@ function render() {
   }
   document.querySelectorAll(".gate-port").forEach((e) => (e.textContent = (s.settings && s.settings.listen_port) || "?"));
   renderPublicIP(s);
+  renderVersions(s);
 
   renderHub(s);
   renderUsers();
@@ -126,6 +127,32 @@ function render() {
   }
 }
 let renderedSettings = false;
+
+// ---------- versions ----------
+function cmpVer(a, b) {
+  const pa = String(a).split(".").map(Number), pb = String(b).split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+function renderVersions(s) {
+  $("app-version").textContent = "v" + s.version;
+  $("ver-app").textContent = s.version + (s.running_installed ? " (the installed copy)" : "");
+  $("ver-installed").textContent = s.service_version || "not installed";
+  const note = $("ver-note");
+  let text = "", kind = "";
+  if (s.service_version) {
+    const c = cmpVer(s.version, s.service_version);
+    if (c > 0) { text = `Update available: click Install / update service to install ${s.version}.`; kind = "warn"; }
+    else if (c < 0) { text = `This app (${s.version}) is older than the installed service (${s.service_version}). Open the newer securdp.exe to manage the server.`; kind = "warn"; }
+    else if (s.running_installed) { text = "Up to date. To update later, open the new securdp.exe you copy over (not this installed copy or the tray icon) and install from there."; kind = "good"; }
+    else { text = "Up to date."; kind = "good"; }
+  }
+  note.textContent = text;
+  note.className = "ver-note " + kind + (text ? "" : " hidden");
+}
 
 // ---------- public IP ----------
 let lastPublicIP = "";
@@ -195,7 +222,19 @@ const svcAction = (id, path, msg, confirmMsg) =>
       await refresh();
     })
   );
-svcAction("svc-install", "service/install", "Service installed and started.");
+// Install/update: warn before reinstalling an older or identical version.
+$("svc-install").addEventListener("click", (e) =>
+  run(e.target, async () => {
+    const inst = state.service_version, app = state.version;
+    if (inst && cmpVer(app, inst) < 0 &&
+      !confirm(`This app is ${app}, older than the installed ${inst}. Installing would downgrade the service. Continue?`)) return;
+    if (inst && cmpVer(app, inst) === 0 && state.running_installed &&
+      !confirm(`You're running the installed copy (${inst}), so this reinstalls the same version.\n\nTo update, close this window and open the NEW securdp.exe you copied over, then install from there.\n\nReinstall ${inst} anyway?`)) return;
+    await api("service/install");
+    toast(`Service ${inst ? "updated to" : "installed:"} ${app}.`);
+    await refresh();
+  })
+);
 svcAction("svc-restart", "service/restart", "Service restarted.");
 svcAction("svc-stop", "service/stop", "Service stopped.");
 svcAction("svc-uninstall", "service/uninstall", "Service removed.", "Remove the SecuRDP service and its firewall rules? Your users and settings are kept.");

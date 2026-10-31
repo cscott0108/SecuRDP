@@ -23,6 +23,7 @@ import (
 	"securdp/internal/auth"
 	"securdp/internal/config"
 	"securdp/internal/ddns"
+	"securdp/internal/version"
 	"securdp/internal/logx"
 	"securdp/internal/winutil"
 )
@@ -244,7 +245,7 @@ func Run(ctx context.Context, log *logx.Logger) error {
 	if cfg.IsHub() {
 		mode = "hub"
 	}
-	log.Printf("listening on %s (%s mode), computers: %s, host key %s", addr, mode, strings.Join(names, ", "),
+	log.Printf("SecuRDP %s listening on %s (%s mode), computers: %s, host key %s", version.Version, addr, mode, strings.Join(names, ", "),
 		ssh.FingerprintSHA256(signer.PublicKey()))
 	go func() { <-ctx.Done(); ln.Close() }()
 	go ddns.Run(ctx, log) // no-op unless DuckDNS is configured

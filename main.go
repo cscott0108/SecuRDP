@@ -12,10 +12,11 @@ import (
 	"securdp/internal/gui"
 	"securdp/internal/service"
 	"securdp/internal/tray"
+	ver "securdp/internal/version"
 	"securdp/internal/winutil"
 )
 
-const version = "1.4.0"
+const version = ver.Version
 
 const usage = `SecuRDP ` + version + `
 
