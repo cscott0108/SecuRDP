@@ -13,3 +13,6 @@ keystore.properties
 # Local scratch
 Screenshot*.png
 Thumbs.db
+
+# Packaged archives
+*.zip
