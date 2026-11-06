@@ -111,4 +111,12 @@ class ProfileStore(context: Context) {
         save(list.map { if (it.name == name) it.copy(computerPorts = it.computerPorts + (computer to port)) else it })
         return port
     }
+
+    /**
+     * Lets chrome://inspect on a USB-connected PC see the in-app web pages
+     * (console, network). Off by default: it's a troubleshooting aid.
+     */
+    var pageDebugging: Boolean
+        get() = prefs.getBoolean("pageDebugging", false)
+        set(v) = prefs.edit().putBoolean("pageDebugging", v).apply()
 }

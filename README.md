@@ -129,6 +129,8 @@ In the apps, after logging in to the hub, the hub screen shows **Remote Desktop*
     - Downloads are saved to `Downloads/SecuRDP`.
     - Links a page builds with its *real* home address (common for full-size images) are routed back through the tunnel; 1.6+ hubs tell the app that address.
     - Links to other home-network addresses explain why they can't open, and internet links open in your browser.
+    - Fullscreen (image viewers, videos) is supported; Back leaves it.
+    - **⋮ → Page debugging (USB)** lets `chrome://inspect` on a USB-connected PC show the page's console and network requests (off by default). Page console messages also go to `adb logcat -s SecuRDPWeb`.
 
 Security:
 - Paths can never leave a shared folder. `..`, junctions or symlinks pointing outside, Windows device names and alternate data streams are all refused.

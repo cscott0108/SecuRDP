@@ -548,6 +548,14 @@ private suspend fun viewFile(ctx: Context, t: Tunnel, path: String, name: String
 
 // ------------------------------------------------------------------ web page
 
+private const val MATCH = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+
+private tailrec fun Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -561,6 +569,10 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
     var progress by remember { mutableStateOf(0) } // 0-100 for the page being loaded
     var localPort by remember { mutableStateOf(0) }
     var unreachable by remember { mutableStateOf<String?>(null) }
+    var menu by remember { mutableStateOf(false) }
+    var debugging by remember { mutableStateOf(store.pageDebugging) }
+    // A page element shown fullscreen (image viewer, video), see onShowCustomView.
+    var fullscreen by remember { mutableStateOf<Pair<android.view.View, WebChromeClient.CustomViewCallback>?>(null) }
     val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     fun toast(m: String) = main.post { Toast.makeText(ctx, m, Toast.LENGTH_LONG).show() }
 
@@ -580,6 +592,27 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
         onDispose { thread(isDaemon = true) { runCatching { h?.close() } } }
     }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
+    // Declared after the one above so Back leaves fullscreen first.
+    BackHandler(enabled = fullscreen != null) { fullscreen?.second?.onCustomViewHidden() }
+    LaunchedEffect(debugging) { WebView.setWebContentsDebuggingEnabled(debugging) }
+
+    // Fullscreen the standard way: the page's element goes over the whole
+    // activity window with the system bars hidden, and comes back on exit.
+    val activity = remember(ctx) { ctx.findActivity() }
+    DisposableEffect(fullscreen) {
+        val (view, _) = fullscreen ?: return@DisposableEffect onDispose {}
+        val decor = activity?.window?.decorView as? android.widget.FrameLayout
+        val bars = activity?.window?.let { androidx.core.view.WindowCompat.getInsetsController(it, it.decorView) }
+        decor?.addView(view, android.widget.FrameLayout.LayoutParams(MATCH, MATCH))
+        bars?.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        bars?.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            decor?.removeView(view)
+            bars?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        }
+    }
+    // Leaving the page while fullscreen still tells the page it ended.
+    DisposableEffect(Unit) { onDispose { fullscreen?.second?.onCustomViewHidden() } }
 
     /** Decides where a navigation goes; true = handled here (don't load it in the view). */
     fun route(view: WebView, url: String): Boolean = when (val r = routeLink(url, localPort, service.target)) {
@@ -597,6 +630,21 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                 if (progress < 100 && ready != null) TextButton(onClick = { web?.stopLoading(); progress = 100 }) { Text("✕") }
                 else TextButton(onClick = { web?.reload() }) { Text("↻") }
                 TextButton(onClick = { TunnelManager.openExternal(ctx, profile, service, store) }) { Text("Chrome ↗") }
+                Box {
+                    TextButton(onClick = { menu = true }) { Text("⋮") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Page debugging (USB)") },
+                            leadingIcon = { Checkbox(checked = debugging, onCheckedChange = null) },
+                            onClick = {
+                                debugging = !debugging
+                                store.pageDebugging = debugging
+                                menu = false
+                                if (debugging) toast("Connect the phone by USB and open chrome://inspect on the PC. Reopen the page if it isn't listed.")
+                            },
+                        )
+                    }
+                }
             },
         )
     }) { pad ->
@@ -612,6 +660,9 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                 url == null -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 else -> AndroidView(modifier = Modifier.fillMaxSize(), factory = { c ->
                     WebView(c).apply {
+                        // AndroidView otherwise lays the WebView out as wrap_content, and pages
+                        // then see a 0px viewport height (100vh/dvh = 0).
+                        layoutParams = android.view.ViewGroup.LayoutParams(MATCH, MATCH)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.loadWithOverviewMode = true
@@ -624,6 +675,19 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                         val mainView = this
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView, newProgress: Int) { progress = newProgress }
+
+                            // Element.requestFullscreen() (image viewers, videos) only works if the app shows the view.
+                            override fun onShowCustomView(view: android.view.View, callback: CustomViewCallback) {
+                                if (fullscreen != null) callback.onCustomViewHidden() else fullscreen = view to callback
+                            }
+
+                            override fun onHideCustomView() { fullscreen = null }
+
+                            // Page errors go to logcat (adb logcat -s SecuRDPWeb) for troubleshooting.
+                            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
+                                android.util.Log.d("SecuRDPWeb", "${msg.messageLevel()} ${msg.sourceId()}:${msg.lineNumber()} ${msg.message()}")
+                                return true
+                            }
 
                             // A "new window" is loaded in this view instead (Back returns to the gallery).
                             override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
