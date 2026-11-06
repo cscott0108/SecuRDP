@@ -118,6 +118,7 @@ function render() {
 
   renderHub(s);
   renderSharing(s);
+  if (!$("hub-view").classList.contains("hidden")) renderExternal();
   renderUsers();
   renderProfiles();
   if (s.log !== undefined) {
@@ -735,13 +736,40 @@ function openHub(name, info) {
   }
   $("hub-web").innerHTML = "";
   for (const s of services) {
-    $("hub-web").append(el("button", {
-      class: "tile",
-      onclick: (e) => run(e.target, async () => { await api("hub/web", { name, service: s.name }); toast(`Opening ${s.name}…`); }),
-    }, el("span", { class: "ico" }, "🌐"), el("span", {}, el("b", {}, s.name), el("div", { class: "muted small" }, s.scheme + " · " + (s.path || "/")))));
+    $("hub-web").append(el("div", { class: "web-tile" },
+      el("button", {
+        class: "tile",
+        onclick: (e) => run(e.target, async () => { await api("hub/web", { name, service: s.name }); toast(`Opening ${s.name}…`); }),
+      }, el("span", { class: "ico" }, "🌐"), el("span", {}, el("b", {}, s.name), el("div", { class: "muted small" }, s.scheme + " · " + (s.path || "/")))),
+      el("button", {
+        class: "small-btn",
+        title: "Open in your default browser through the tunnel",
+        onclick: (e) => run(e.target, async () => {
+          await api("hub/webext", { name, service: s.name, on: true });
+          toast(`${s.name} opened in your browser. It stays connected until you click Stop here.`);
+          await refresh();
+        }),
+      }, "Open in browser ↗")));
   }
+  renderExternal();
   showHubPane("home");
   $("hub-view").classList.remove("hidden");
+}
+
+// Web pages opened in the default browser keep the tunnel up until stopped.
+function renderExternal() {
+  const box = $("hub-external");
+  if (!box || !hubView.name) return;
+  const open = ((state.external || {})[hubView.name]) || [];
+  box.innerHTML = "";
+  for (const svc of open) {
+    box.append(el("div", { class: "ext-row" },
+      el("span", {}, "↗ ", el("b", {}, svc), " is open in your browser"),
+      el("button", { class: "danger small-btn", onclick: (e) => run(e.target, async () => {
+        await api("hub/webext", { name: hubView.name, service: svc, on: false });
+        await refresh();
+      }) }, "Stop")));
+  }
 }
 
 function showHubPane(which) {

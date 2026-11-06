@@ -131,6 +131,7 @@ fun MainScreen(store: ProfileStore) {
                 },
                 onFolder = { screen = Screen.Files(it) },
                 onWeb = { screen = Screen.Web(it) },
+                onWebExternal = { TunnelManager.openExternal(context, hub.first, it, store) },
                 onClose = { screen = Screen.Main },
             )
             is Screen.Files -> FilesScreen(

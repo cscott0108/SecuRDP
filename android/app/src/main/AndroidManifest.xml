@@ -10,6 +10,11 @@
     <queries>
         <package android:name="com.microsoft.rdc.androidx" />
         <package android:name="com.microsoft.rdc.android" />
+        <package android:name="com.android.chrome" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="rdp" />

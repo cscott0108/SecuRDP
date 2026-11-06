@@ -54,6 +54,44 @@ object TunnelManager {
         tunnel?.close("Disconnected")
     }
 
+    // Web pages opened in the phone's browser: each holds the tunnel open
+    // until stopped (the browser can't tell us when its tab is closed).
+    private val external = mutableMapOf<String, AutoCloseable>()
+    private val _externalPages = MutableStateFlow<Set<String>>(emptySet())
+    val externalPages: StateFlow<Set<String>> = _externalPages
+
+    /** Opens a hub web page in Chrome (or the default browser) through the tunnel. */
+    fun openExternal(context: Context, profile: Profile, service: HubService, store: ProfileStore) {
+        val t = tunnel ?: return
+        thread(name = "securdp-external") {
+            try {
+                val port = store.portFor(profile.name, "web:" + service.name)
+                t.listenService(service.name, port)
+                synchronized(external) {
+                    if (service.name !in external) external[service.name] = t.hold()
+                    _externalPages.value = external.keys.toSet()
+                }
+                openInBrowser(context, "${service.scheme}://127.0.0.1:$port${service.path}")
+            } catch (e: Exception) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(context, e.message ?: "Couldn't open ${service.name}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    fun stopExternal(name: String) {
+        val h = synchronized(external) {
+            external.remove(name).also { _externalPages.value = external.keys.toSet() }
+        }
+        thread(isDaemon = true) { runCatching { h?.close() } }
+    }
+
+    internal fun clearExternal() = synchronized(external) {
+        external.clear()
+        _externalPages.value = emptySet()
+    }
+
     /** Answers the hub picker; null computer cancels (and logs out). */
     fun choose(context: Context, computer: String?, remember: Boolean) {
         context.startService(
@@ -119,6 +157,7 @@ class TunnelService : Service() {
 
                     override fun onClosed(reason: String) {
                         TunnelManager.tunnel = null
+                        TunnelManager.clearExternal()
                         current = null
                         TunnelManager.set(if (reason == "Disconnected") TunnelState.Idle else TunnelState.Failed(reason))
                         stopSelfSafely()
@@ -220,6 +259,19 @@ class TunnelService : Service() {
             .addAction(0, "Disconnect", stop)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
+    }
+}
+
+/** Opens a URL in Chrome if installed, otherwise the default browser. */
+fun openInBrowser(context: Context, url: String) {
+    val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(Intent(view).setPackage("com.android.chrome"))
+    } catch (_: ActivityNotFoundException) {
+        try {
+            context.startActivity(view)
+        } catch (_: ActivityNotFoundException) {
+        }
     }
 }
 

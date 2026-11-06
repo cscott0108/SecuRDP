@@ -75,6 +75,9 @@ func TestHubInfoListsGrantsOnly(t *testing.T) {
 	}
 	for _, s := range info.Services {
 		services = append(services, s.Name+" "+s.Path)
+		if !strings.HasPrefix(s.Target, "127.0.0.1:") {
+			t.Errorf("service target not shared: %q", s.Target)
+		}
 	}
 	if strings.Join(folders, ",") != "media,drop" || strings.Join(services, ",") != "router /admin" || len(info.Computers) != 2 {
 		t.Fatalf("info: computers=%v folders=%v services=%v", info.Computers, folders, services)

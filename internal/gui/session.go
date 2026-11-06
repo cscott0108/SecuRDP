@@ -30,9 +30,11 @@ type session struct {
 	t    *client.Tunnel
 	info *client.HubInfo
 
-	mu      sync.Mutex
-	holds   int    // file browsers / web windows open
-	release func() // lets go of the hub-side hold
+	mu       sync.Mutex
+	holds    int               // file browsers / web windows open
+	release  func()            // lets go of the hub-side hold
+	svcAddr  map[string]string // web page -> local tunnel address
+	external map[string]bool   // web pages opened in the default browser
 }
 
 func (a *app) openSession(name string, t *client.Tunnel, info *client.HubInfo) {
@@ -123,6 +125,7 @@ func (a *app) sessionRoutes(mux *http.ServeMux) {
 		return nil, nil
 	})
 	a.api(mux, "/api/hub/web", false, a.openWeb)
+	a.api(mux, "/api/hub/webext", false, a.openExternal)
 
 	a.api(mux, "/api/files/browse", false, func(r *http.Request) (any, error) {
 		in, err := decode[nameReq](r)
@@ -283,31 +286,10 @@ func (a *app) openWeb(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var svc *client.HubService
-	for i := range s.info.Services {
-		if s.info.Services[i].Name == in.Service {
-			svc = &s.info.Services[i]
-		}
-	}
-	if svc == nil {
-		return nil, errors.New("no such web page")
-	}
-	// A stable loopback address per service keeps its cookies/logins.
-	cc, err := config.LoadClient()
+	url, svc, err := s.serviceURL(in.Name, in.Service)
 	if err != nil {
 		return nil, err
 	}
-	p := cc.Find(in.Name)
-	if p == nil {
-		return nil, errors.New("profile not found")
-	}
-	ip := cc.ComputerIP(p, "web:"+svc.Name)
-	config.SaveClient(cc)
-	addr, err := s.t.ListenService(svc.Name, ip)
-	if err != nil {
-		return nil, err
-	}
-	url := svc.Scheme + "://" + addr + svc.Path
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -320,6 +302,100 @@ func (a *app) openWeb(r *http.Request) (any, error) {
 	s.hold()
 	go func() { cmd.Wait(); s.unhold() }()
 	return map[string]string{"url": url}, nil
+}
+
+// serviceURL returns the local tunnel URL for a hub web page, starting its
+// listener once per session. A stable loopback address per service keeps
+// its cookies and logins between visits.
+func (s *session) serviceURL(profile, service string) (string, *client.HubService, error) {
+	var svc *client.HubService
+	for i := range s.info.Services {
+		if s.info.Services[i].Name == service {
+			svc = &s.info.Services[i]
+		}
+	}
+	if svc == nil {
+		return "", nil, errors.New("no such web page")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.svcAddr == nil {
+		s.svcAddr = map[string]string{}
+	}
+	addr, ok := s.svcAddr[service]
+	if !ok {
+		cc, err := config.LoadClient()
+		if err != nil {
+			return "", nil, err
+		}
+		p := cc.Find(profile)
+		if p == nil {
+			return "", nil, errors.New("profile not found")
+		}
+		ip := cc.ComputerIP(p, "web:"+svc.Name)
+		config.SaveClient(cc)
+		if addr, err = s.t.ListenService(svc.Name, ip); err != nil {
+			return "", nil, err
+		}
+		s.svcAddr[service] = addr
+	}
+	return svc.Scheme + "://" + addr + svc.Path, svc, nil
+}
+
+// openExternal opens (on) or stops (off) a hub web page in the default
+// browser. The tunnel can't tell when the browser tab closes, so it stays
+// up until the user clicks Stop on the hub screen (or disconnects).
+func (a *app) openExternal(r *http.Request) (any, error) {
+	in, err := decode[nameReq](r)
+	if err != nil {
+		return nil, err
+	}
+	s, err := a.session(in.Name)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	open := s.external[in.Service]
+	s.mu.Unlock()
+	if !in.On {
+		if open {
+			s.mu.Lock()
+			delete(s.external, in.Service)
+			s.mu.Unlock()
+			s.unhold()
+		}
+		return nil, nil
+	}
+	url, _, err := s.serviceURL(in.Name, in.Service)
+	if err != nil {
+		return nil, err
+	}
+	if !open {
+		s.hold()
+		s.mu.Lock()
+		if s.external == nil {
+			s.external = map[string]bool{}
+		}
+		s.external[in.Service] = true
+		s.mu.Unlock()
+	}
+	verb, _ := windows.UTF16PtrFromString("open")
+	target, _ := windows.UTF16PtrFromString(url)
+	if err := windows.ShellExecute(0, verb, target, nil, nil, windows.SW_SHOWNORMAL); err != nil {
+		return nil, err
+	}
+	return map[string]string{"url": url}, nil
+}
+
+// externalPages lists web pages currently opened in the default browser.
+func (s *session) externalPages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []string{}
+	for n := range s.external {
+		out = append(out, n)
+	}
+	return out
 }
 
 // thumbCache keeps recent thumbnails so scrolling back doesn't refetch.

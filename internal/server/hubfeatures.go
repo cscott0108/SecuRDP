@@ -20,6 +20,7 @@ const (
 	//   c \t name \t online \t default      (computers)
 	//   f \t name \t writable               (shared folders)
 	//   s \t name \t scheme \t path         (web services)
+	//   S \t name \t host:port              (a web service's own address, 1.6+)
 	hubHost   = "hub.securdp"
 	filesHost = "files.securdp" // one file request per channel (see package files)
 	holdHost  = "hold.securdp"  // held open by a client browsing files or web pages
@@ -51,8 +52,12 @@ func (s *Server) sendHubInfo(nc ssh.NewChannel, user, loginComputer string) {
 			fmt.Fprintf(&b, "f\t%s\t%d\n", f.Name, b2i(f.Writable))
 		}
 		for _, w := range cfg.GrantedServices(u) {
-			if _, scheme, path, err := w.Target(); err == nil {
+			if hostport, scheme, path, err := w.Target(); err == nil {
 				fmt.Fprintf(&b, "s\t%s\t%s\t%s\n", w.Name, scheme, path)
+				// The service's own address, so clients can route links a page
+				// builds with it back through the tunnel. A separate line type
+				// keeps pre-1.6 clients (which skip unknown lines) working.
+				fmt.Fprintf(&b, "S\t%s\t%s\n", w.Name, hostport)
 			}
 		}
 	}

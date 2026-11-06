@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -114,10 +115,12 @@ fun HubScreen(
     onRdp: (String, Boolean) -> Unit,
     onFolder: (String) -> Unit,
     onWeb: (HubService) -> Unit,
+    onWebExternal: (HubService) -> Unit,
     onClose: () -> Unit,
 ) {
     BackHandler(onBack = onClose)
     var keep by remember { mutableStateOf(false) }
+    val external by TunnelManager.externalPages.collectAsStateWithLifecycle()
     Scaffold(topBar = {
         TopAppBar(
             title = { Text(profileName, fontWeight = FontWeight.SemiBold) },
@@ -158,8 +161,25 @@ fun HubScreen(
             }
             if (info.services.isNotEmpty()) {
                 item { SectionTitle("Web pages") }
+                item {
+                    Text(
+                        "Tap to open in the app, or open in Chrome through the same tunnel (better for downloads, new tabs and full-size images).",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 items(info.services) { s ->
-                    HubTile("🌐", s.name, s.scheme + " · " + s.path.ifEmpty { "/" }) { onWeb(s) }
+                    Column {
+                        HubTile("🌐", s.name, s.scheme + " · " + s.path.ifEmpty { "/" }) { onWeb(s) }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                            if (s.name in external) {
+                                Text("Open in your browser", style = MaterialTheme.typography.bodySmall, color = Good)
+                                TextButton(onClick = { TunnelManager.stopExternal(s.name) }) {
+                                    Text("Stop", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            TextButton(onClick = { onWebExternal(s) }) { Text("Open in Chrome ↗") }
+                        }
+                    }
                 }
             }
         }

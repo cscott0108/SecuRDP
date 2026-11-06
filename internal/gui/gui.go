@@ -335,14 +335,17 @@ func (a *app) state(*http.Request) (any, error) {
 		}
 	}
 	hubs := map[string]*client.HubInfo{}
+	external := map[string][]string{} // hub -> web pages open in the default browser
 	for n, s := range a.sessions {
 		if _, ok := conn[n]; ok {
 			hubs[n] = s.info
+			external[n] = s.externalPages()
 		}
 	}
 	a.mu.Unlock()
 	st["connected"] = conn
 	st["hubs"] = hubs
+	st["external"] = external
 	return st, nil
 }
 

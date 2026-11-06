@@ -68,6 +68,10 @@ button.danger { color: var(--bad); }
 .tile-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .tile { display: flex; align-items: center; gap: 10px; padding: 12px 16px; min-width: 180px; text-align: left; }
 .tile .ico { font-size: 22px; }
+.web-tile { display: flex; flex-direction: column; gap: 4px; }
+.small-btn { padding: 3px 10px; font-size: 12px; }
+.ext-list { margin-top: 10px; display: grid; gap: 6px; }
+.ext-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 8px; max-width: 520px; }
 .fb-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; position: sticky; top: -16px; background: var(--bg); padding: 8px 0; z-index: 2; }
 .inline-label { flex-direction: row; align-items: center; gap: 6px; font-weight: 400; font-size: 13px; }
 select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }

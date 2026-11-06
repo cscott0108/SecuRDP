@@ -20,6 +20,7 @@ type HubService struct {
 	Name   string `json:"name"`
 	Scheme string `json:"scheme"`
 	Path   string `json:"path"`
+	Target string `json:"target,omitempty"` // host:port on the home network (1.6+ hubs)
 }
 
 type HubInfo struct {
@@ -69,7 +70,13 @@ func (t *Tunnel) Info() (*HubInfo, error) {
 			case f[0] == "f" && len(f) == 3:
 				info.Folders = append(info.Folders, HubFolder{f[1], f[2] == "1"})
 			case f[0] == "s" && len(f) == 4:
-				info.Services = append(info.Services, HubService{f[1], f[2], f[3]})
+				info.Services = append(info.Services, HubService{Name: f[1], Scheme: f[2], Path: f[3]})
+			case f[0] == "S" && len(f) == 3:
+				for i := range info.Services {
+					if info.Services[i].Name == f[1] {
+						info.Services[i].Target = f[2]
+					}
+				}
 			}
 		}
 		if len(info.Computers)+len(info.Folders)+len(info.Services) > 0 {

@@ -38,7 +38,8 @@ class LoginFailedException :
 data class HubComputer(val name: String, val online: Boolean, val isDefault: Boolean)
 
 data class HubFolder(val name: String, val writable: Boolean)
-data class HubService(val name: String, val scheme: String, val path: String)
+/** [target] is the page's own host:port on the home network (1.6+ hubs), "" if unknown. */
+data class HubService(val name: String, val scheme: String, val path: String, val target: String = "")
 data class HubInfo(val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>)
 
 /** One entry of a shared folder listing. */
@@ -55,6 +56,7 @@ fun parseHubInfo(text: String): HubInfo {
             p[0] == "c" && p.size == 4 -> c += HubComputer(p[1], p[2] == "1", p[3] == "1")
             p[0] == "f" && p.size == 3 -> f += HubFolder(p[1], p[2] == "1")
             p[0] == "s" && p.size == 4 -> s += HubService(p[1], p[2], p[3])
+            p[0] == "S" && p.size == 3 -> s.replaceAll { if (it.name == p[1]) it.copy(target = p[2]) else it }
         }
     }
     return HubInfo(c, f, s)
