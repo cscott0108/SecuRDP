@@ -24,6 +24,7 @@ const (
 	//   S \t name \t host:port              (a web service's own address, 1.6+)
 	//   A \t 1                              (the user may pair app links, 1.7+)
 	//   V \t version                        (the hub's SecuRDP version, 1.8+; see update.go)
+	//   P \t versionCode \t versionName     (the Android app the hub can hand out, 1.9+)
 	hubHost   = "hub.securdp"
 	filesHost = "files.securdp" // one file request per channel (see package files)
 	holdHost  = "hold.securdp"  // held open by a client browsing files or web pages
@@ -47,6 +48,9 @@ func (s *Server) sendHubInfo(nc ssh.NewChannel, user, loginComputer string) {
 	defer ch.Close()
 	var b strings.Builder
 	fmt.Fprintf(&b, "V\t%s\n", version.Version)
+	if a := bundledAPK(); a != nil {
+		fmt.Fprintf(&b, "P\t%d\t%s\n", a.VersionCode, a.VersionName)
+	}
 	for _, c := range s.reachable(user, loginComputer) {
 		fmt.Fprintf(&b, "c\t%s\t%d\t%d\n", c.name, b2i(c.online), b2i(c.isDefault))
 	}

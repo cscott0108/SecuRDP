@@ -90,6 +90,12 @@ Update the hub once (*Install / update* with the new exe). When a 1.8+ app logs 
 - If you're running the **installed copy** (Program Files), or its folder isn't writable, the new version is saved to *Downloads* and opened from there instead. Use **Install / update** in it to update the service on that PC too.
 - Older apps don't see the offer. Copy the new exe over once, and from then on updates come from the hub. The hub's log records each download (`UPDATE … downloaded SecuRDP x.y.z`).
 
+**Android (1.9+):** `build.ps1` bundles the release APK into the exe, so a hub always carries the matching Android app. When a phone logs in to a hub with a newer app, the hub screen shows **Download & install**:
+- The app downloads through the tunnel with its size and SHA-256 checked.
+- It installs through Android's own installer, which asks you to confirm. The first time, it also asks you to let SecuRDP install apps.
+- Android only accepts the update if it's signed with the same key as the installed app.
+- Phones on 1.7 or older need this version installed by hand once.
+
 ### Command line
 
 ```

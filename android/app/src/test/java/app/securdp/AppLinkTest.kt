@@ -44,6 +44,46 @@ class AppLinkTest {
     }
 
     @Test
+    fun hubInfoOffersTheAndroidApp() {
+        val info = parseHubInfo("V\t1.9.0\nP\t9\t1.9.0\nc\tdesktop\t1\t1\n")
+        assertEquals(9, info.apkCode)
+        assertEquals("1.9.0", info.apkName)
+        assertEquals(0, parseHubInfo("c\tdesktop\t1\t1\n").apkCode)
+    }
+
+    /** The hub's Android app downloads intact (test gate started with SECURDP_SERVE_APK). */
+    @Test
+    fun downloadsTheHubsAndroidApp() {
+        val e2ePort: Int = System.getProperty("securdp.e2e.port")?.toInt()
+            ?: run { assumeTrue("set -Dsecurdp.e2e.port", false); return }
+        val apk = System.getProperty("securdp.e2e.apk") ?: run { assumeTrue("set -Dsecurdp.e2e.apk", false); return }
+        val noop = object : Tunnel.Listener {
+            override fun onActiveChanged(active: Int) {}
+            override fun onClosed(reason: String) {}
+        }
+        val pinned = try {
+            Tunnel("127.0.0.1", e2ePort, "probe.user", "", 0, noop).connect("x", "000000")
+            error("expected UnknownHostException")
+        } catch (e: UnknownHostException) {
+            e.fingerprint
+        }
+        val t = Tunnel("127.0.0.1", e2ePort, "probe.user", pinned, 0, noop)
+        t.connect("Test-passphrase-123", TunnelTest.totp("JBSWY3DPEHPK3PXP", -1))
+        try {
+            val info = t.info()
+            assertEquals(99, info.apkCode)
+            val out = java.io.ByteArrayOutputStream()
+            var last = 0L
+            assertEquals("9.9.9", t.downloadApk(out) { done, _ -> last = done })
+            val want = java.io.File(apk).readBytes()
+            assertTrue(out.toByteArray().contentEquals(want))
+            assertEquals(want.size.toLong(), last)
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test
     fun suggestsThePagesOwnPort() {
         val pet = HubService("pet", "http", "/", "127.0.0.1:11435")
         assertEquals(11435, suggestedLinkPort(pet, emptySet()))

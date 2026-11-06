@@ -16,3 +16,6 @@ Thumbs.db
 
 # Packaged archives
 *.zip
+
+# Android app bundled into the exe by build.ps1
+internal/apk/bundle/version.txt

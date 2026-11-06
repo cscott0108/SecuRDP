@@ -40,10 +40,13 @@ data class HubComputer(val name: String, val online: Boolean, val isDefault: Boo
 data class HubFolder(val name: String, val writable: Boolean)
 /** [target] is the page's own host:port on the home network (1.6+ hubs), "" if unknown. */
 data class HubService(val name: String, val scheme: String, val path: String, val target: String = "")
-/** [appLinks]: this login may pair app links (1.7+ hubs). */
+/**
+ * [appLinks]: this login may pair app links (1.7+ hubs). [apkCode] / [apkName]:
+ * the Android app the hub can hand out (1.9+ hubs; 0 = none).
+ */
 data class HubInfo(
     val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>,
-    val appLinks: Boolean = false,
+    val appLinks: Boolean = false, val apkCode: Int = 0, val apkName: String = "",
 )
 
 /** One entry of a shared folder listing. */
@@ -55,6 +58,8 @@ fun parseHubInfo(text: String): HubInfo {
     val f = mutableListOf<HubFolder>()
     val s = mutableListOf<HubService>()
     var links = false
+    var apkCode = 0
+    var apkName = ""
     for (line in text.lines()) {
         val p = line.split("\t")
         when {
@@ -63,9 +68,10 @@ fun parseHubInfo(text: String): HubInfo {
             p[0] == "s" && p.size == 4 -> s += HubService(p[1], p[2], p[3])
             p[0] == "S" && p.size == 3 -> s.replaceAll { if (it.name == p[1]) it.copy(target = p[2]) else it }
             p[0] == "A" && p.size == 2 -> links = p[1] == "1"
+            p[0] == "P" && p.size == 3 -> { apkCode = p[1].toIntOrNull() ?: 0; apkName = p[2] }
         }
     }
-    return HubInfo(c, f, s, links)
+    return HubInfo(c, f, s, links, apkCode, apkName)
 }
 
 /** Parses a folder listing: "d|f \t size \t mtime \t name" lines. */
@@ -351,6 +357,45 @@ class Tunnel(
 
     /** Removes a paired device from the hub. */
     fun unpair(device: String) = linkRequest("unpair\t$device")
+
+    /**
+     * Downloads the Android app the hub offers into [out], checking its size
+     * and SHA-256. [progress] gets (bytes so far, total). Returns its versionName.
+     */
+    fun downloadApk(out: OutputStream, progress: (Long, Long) -> Unit = { _, _ -> }): String {
+        val s = session ?: throw IllegalStateException("not connected")
+        val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+            setHost("apk.securdp")
+            setPort(0)
+        }
+        val input = ch.inputStream
+        try {
+            try {
+                ch.connect(10_000)
+            } catch (e: Exception) {
+                throw Exception("The hub has no Android app to offer")
+            }
+            val f = (readLine(input) ?: throw Exception("No reply from the hub")).split("\t")
+            if (f[0] != "ok" || f.size != 4) throw Exception(f.getOrNull(1) ?: "Unexpected reply from the hub")
+            val size = f[1].toLongOrNull()?.takeIf { it in 1..(256L shl 20) } ?: throw Exception("Unexpected app size")
+            val md = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(64 * 1024)
+            var done = 0L
+            while (done < size) {
+                val n = input.read(buf, 0, minOf(buf.size.toLong(), size - done).toInt())
+                if (n < 0) throw Exception("Download stopped after $done of $size bytes")
+                out.write(buf, 0, n)
+                md.update(buf, 0, n)
+                done += n
+                progress(done, size)
+            }
+            val sum = md.digest().joinToString("") { "%02x".format(it) }
+            if (sum != f[2]) throw Exception("The download was damaged (checksum mismatch)")
+            return f[3]
+        } finally {
+            ch.disconnect()
+        }
+    }
 
     private fun linkRequest(line: String) {
         val s = session ?: throw IllegalStateException("not connected")

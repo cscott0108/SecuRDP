@@ -168,6 +168,7 @@ fun MainScreen(store: ProfileStore) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item { StatusCard(state, context, onOpenHub = { screen = Screen.Hub }) }
+            hubOf(state)?.let { (_, info) -> item { ApkUpdateCard(info) } }
             if (profiles.isEmpty()) {
                 item {
                     Text(

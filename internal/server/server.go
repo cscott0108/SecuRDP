@@ -390,6 +390,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 		case host == updateHost:
 			go s.serveUpdate(nc, user, ip)
 			continue
+		case host == apkHost:
+			go s.serveAPK(nc, user, ip)
+			continue
 		case host == pairHost:
 			go s.pair(nc, user, ip)
 			continue

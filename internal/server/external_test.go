@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"image/color"
@@ -21,6 +23,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"securdp/internal/apk"
 	"securdp/internal/auth"
 	"securdp/internal/config"
 	"securdp/internal/logx"
@@ -113,6 +116,16 @@ func TestServeForExternalClient(t *testing.T) {
 	// The exe offered as an update (default: this test binary).
 	if exe := os.Getenv("SECURDP_SERVE_EXE"); exe != "" {
 		exePath = func() (string, error) { return exe, nil }
+	}
+	// The Android app offered (default: what this build bundles, if anything).
+	if p := os.Getenv("SECURDP_SERVE_APK"); p != "" {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		a := &apk.Bundled{Data: data, SHA256: hex.EncodeToString(sum[:]), VersionCode: 99, VersionName: "9.9.9"}
+		bundledAPK = func() *apk.Bundled { return a }
 	}
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
