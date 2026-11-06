@@ -23,14 +23,8 @@ func RunWeb(title, rawURL string) error {
 		return errors.New("web: only tunnelled loopback addresses can be opened")
 	}
 	os.MkdirAll(config.ClientDir(), 0o700)
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
-		AutoFocus: true,
-		// Separate browser profile from the main window; cookies persist per service address.
-		DataPath: filepath.Join(config.ClientDir(), "webview-web"),
-		WindowOptions: webview2.WindowOptions{
-			Title: "SecuRDP - " + title, Width: 1280, Height: 860, Center: true, IconId: 1,
-		},
-	})
+	// Separate browser profile from the main window; cookies persist per service address.
+	w := newWebWindow(title, filepath.Join(config.ClientDir(), "webview-web"))
 	if w == nil {
 		return errors.New("WebView2 is not available")
 	}
@@ -38,6 +32,20 @@ func RunWeb(title, rawURL string) error {
 	w.SetHtml(loadingPage(title, u.String()))
 	w.Run()
 	return nil
+}
+
+// newWebWindow creates the window a hub web page is shown in. Debug is what
+// go-webview2 ties the browser's right-click menu (Copy, Paste, Save image…)
+// to, so it's on; it also enables F12 / Inspect for troubleshooting pages.
+func newWebWindow(title, dataPath string) webview2.WebView {
+	return webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:     true,
+		AutoFocus: true,
+		DataPath:  dataPath,
+		WindowOptions: webview2.WindowOptions{
+			Title: "SecuRDP - " + title, Width: 1280, Height: 860, Center: true, IconId: 1,
+		},
+	})
 }
 
 // loadingPage is shown first because WebView2 has no loading indicator of its

@@ -137,6 +137,7 @@ In the apps, after logging in to the hub, the hub screen shows **Remote Desktop*
   - **Windows:** click to open a folder; click a file for Open / Download (right-click also offers Rename / Delete in writable folders). Upload and New folder appear in writable folders.
   - **Android:** tap a file for Open / Save to phone / Share, plus Rename / Delete in writable folders.
 - **Web pages** open in a SecuRDP browser window (Windows) or in the app (Android), through the tunnel. Self-signed certificates (typical for routers) ask once before continuing.
+  - **Windows window (1.9.1+):** the right-click menu (Copy, Paste, Save image…) and F12 / Inspect work as in Edge. Ctrl+C / Ctrl+V work too.
   - **Open in browser / Open in Chrome ↗** hands the page to your normal browser through the same tunnel. Useful for pages with downloads, pop-ups or new tabs. It stays connected until you tap **Stop** on the hub screen, or disconnect.
   - **Android in-app browser:**
     - Pages that open a "new window" open in the same view (Back returns).
