@@ -20,6 +20,19 @@ data class Profile(
     val computerPorts: Map<String, Int> = emptyMap(),
 )
 
+/**
+ * An app link paired with a hub: 127.0.0.1:[localPort] reaches [service] on
+ * [profile]'s hub using the Keystore key [keyAlias] (see AppLink).
+ */
+data class LinkConfig(
+    val keyAlias: String,
+    val profile: String,
+    val device: String,
+    val service: String,
+    val localPort: Int,
+    val enabled: Boolean = true,
+)
+
 class ProfileStore(context: Context) {
     private val prefs = context.getSharedPreferences("profiles", Context.MODE_PRIVATE)
 
@@ -119,4 +132,26 @@ class ProfileStore(context: Context) {
     var pageDebugging: Boolean
         get() = prefs.getBoolean("pageDebugging", false)
         set(v) = prefs.edit().putBoolean("pageDebugging", v).apply()
+
+    fun links(): List<LinkConfig> {
+        val arr = JSONArray(prefs.getString("links", "[]"))
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            LinkConfig(
+                o.getString("keyAlias"), o.getString("profile"), o.getString("device"),
+                o.getString("service"), o.getInt("localPort"), o.optBoolean("enabled", true),
+            )
+        }
+    }
+
+    fun saveLinks(list: List<LinkConfig>) {
+        val arr = JSONArray()
+        list.forEach {
+            arr.put(
+                JSONObject().put("keyAlias", it.keyAlias).put("profile", it.profile).put("device", it.device)
+                    .put("service", it.service).put("localPort", it.localPort).put("enabled", it.enabled),
+            )
+        }
+        prefs.edit().putString("links", arr.toString()).apply()
+    }
 }

@@ -121,6 +121,7 @@ table.fb-details { width: 100%; border-collapse: collapse; font-size: 13px; }
 .role:has(input:checked) { border-color: var(--accent); }
 .role input { margin-top: 3px; }
 .access { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.access .device { flex-basis: 100%; }
 .addr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .addr-row pre { margin: 0; flex: 1; min-width: 200px; }
 .pill.good { color: var(--good); border-color: var(--good); }

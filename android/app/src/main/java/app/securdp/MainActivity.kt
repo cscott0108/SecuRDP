@@ -98,6 +98,11 @@ fun MainScreen(store: ProfileStore) {
     var creds by remember { mutableStateOf<Creds?>(null) }
     var openWhenConnected by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf<Screen>(Screen.Main) }
+    var links by remember { mutableStateOf(store.links()) }
+    val linkStatus by LinkManager.status.collectAsStateWithLifecycle()
+    var pairFor by remember { mutableStateOf<HubService?>(null) }
+    // Bring the app links up if Android stopped them (e.g. after force-stop).
+    LaunchedEffect(Unit) { if (links.any { it.enabled }) LinkManager.refresh(context) }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
@@ -132,6 +137,7 @@ fun MainScreen(store: ProfileStore) {
                 onFolder = { screen = Screen.Files(it) },
                 onWeb = { screen = Screen.Web(it) },
                 onWebExternal = { TunnelManager.openExternal(context, hub.first, it, store) },
+                onPairLink = { pairFor = it },
                 onClose = { screen = Screen.Main },
             )
             is Screen.Files -> FilesScreen(
@@ -143,6 +149,9 @@ fun MainScreen(store: ProfileStore) {
                 onClose = { screen = Screen.Hub },
             )
             else -> {}
+        }
+        pairFor?.let { svc ->
+            PairLinkDialog(hub.first, svc, store) { pairFor = null; links = store.links() }
         }
         return
     }
@@ -177,6 +186,14 @@ fun MainScreen(store: ProfileStore) {
                     onEdit = { editing = p },
                     onDelete = { store.delete(p.name); profiles = store.load() },
                 )
+            }
+            if (links.isNotEmpty()) {
+                item {
+                    Text("App links", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                }
+                items(links, key = { it.keyAlias }) { l ->
+                    LinkCard(l, linkStatus[l.keyAlias], store) { links = store.links() }
+                }
             }
             item {
                 Text(

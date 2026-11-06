@@ -40,7 +40,11 @@ data class HubComputer(val name: String, val online: Boolean, val isDefault: Boo
 data class HubFolder(val name: String, val writable: Boolean)
 /** [target] is the page's own host:port on the home network (1.6+ hubs), "" if unknown. */
 data class HubService(val name: String, val scheme: String, val path: String, val target: String = "")
-data class HubInfo(val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>)
+/** [appLinks]: this login may pair app links (1.7+ hubs). */
+data class HubInfo(
+    val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>,
+    val appLinks: Boolean = false,
+)
 
 /** One entry of a shared folder listing. */
 data class HubFile(val name: String, val dir: Boolean, val size: Long, val mtime: Long)
@@ -50,6 +54,7 @@ fun parseHubInfo(text: String): HubInfo {
     val c = mutableListOf<HubComputer>()
     val f = mutableListOf<HubFolder>()
     val s = mutableListOf<HubService>()
+    var links = false
     for (line in text.lines()) {
         val p = line.split("\t")
         when {
@@ -57,9 +62,10 @@ fun parseHubInfo(text: String): HubInfo {
             p[0] == "f" && p.size == 3 -> f += HubFolder(p[1], p[2] == "1")
             p[0] == "s" && p.size == 4 -> s += HubService(p[1], p[2], p[3])
             p[0] == "S" && p.size == 3 -> s.replaceAll { if (it.name == p[1]) it.copy(target = p[2]) else it }
+            p[0] == "A" && p.size == 2 -> links = p[1] == "1"
         }
     }
-    return HubInfo(c, f, s)
+    return HubInfo(c, f, s, links)
 }
 
 /** Parses a folder listing: "d|f \t size \t mtime \t name" lines. */
@@ -102,6 +108,29 @@ private class PinnedHostKey(private val pinned: String) : HostKeyRepository {
     override fun getHostKey(): Array<HostKey> = emptyArray()
     override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
 }
+
+/**
+ * A JSch session set up for a SecuRDP gate: only what the gate offers (modern,
+ * AEAD-only, ed25519 host key) and only the pinned host key.
+ */
+internal fun gateSession(host: String, port: Int, username: String, keys: HostKeyRepository, jsch: JSch = JSch()): Session {
+    jsch.hostKeyRepository = keys
+    val s = jsch.getSession(username, host, port)
+    s.setConfig("kex", "curve25519-sha256,curve25519-sha256@libssh.org")
+    s.setConfig("server_host_key", "ssh-ed25519")
+    s.setConfig("cipher.c2s", "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com")
+    s.setConfig("cipher.s2c", "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com")
+    s.setConfig("mac.c2s", "hmac-sha2-256-etm@openssh.com")
+    s.setConfig("mac.s2c", "hmac-sha2-256-etm@openssh.com")
+    s.setConfig("StrictHostKeyChecking", "yes")
+    return s
+}
+
+/** Accepts only the pinned key; remembers what the server presented. */
+internal fun pinnedHostKey(pinned: String): HostKeyRepository = PinnedHostKey(pinned)
+
+/** What the gate presented, for telling "unknown/changed host" from "login refused". */
+internal fun HostKeyRepository.seenFingerprint(): String? = (this as? PinnedHostKey)?.seen
 
 /** Answers the server's "Password:" / "Authenticator code:" prompt exactly once. */
 private class Answers(private val password: String, private val code: String) :
@@ -187,16 +216,7 @@ class Tunnel(
     /** Connects and authenticates only (then [computers] / [listen]). Blocking. */
     fun connect(password: String, code: String) {
         val keys = PinnedHostKey(pinnedFingerprint)
-        val jsch = JSch().apply { hostKeyRepository = keys }
-        val s = jsch.getSession(username, host, port)
-        // Only what the SecuRDP server offers: modern, AEAD-only, ed25519 host key.
-        s.setConfig("kex", "curve25519-sha256,curve25519-sha256@libssh.org")
-        s.setConfig("server_host_key", "ssh-ed25519")
-        s.setConfig("cipher.c2s", "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com")
-        s.setConfig("cipher.s2c", "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com")
-        s.setConfig("mac.c2s", "hmac-sha2-256-etm@openssh.com")
-        s.setConfig("mac.s2c", "hmac-sha2-256-etm@openssh.com")
-        s.setConfig("StrictHostKeyChecking", "yes")
+        val s = gateSession(host, port, username, keys)
         s.setConfig("PreferredAuthentications", "keyboard-interactive")
         s.userInfo = Answers(password, code)
         s.setServerAliveInterval(30_000)
@@ -321,6 +341,33 @@ class Tunnel(
         val info = text?.let { parseHubInfo(it) }
         if (info != null && (info.computers.size + info.folders.size + info.services.size) > 0) return info
         return HubInfo(computers(), emptyList(), emptyList())
+    }
+
+    /**
+     * Pairs this device's [publicKey] (authorized_keys format) as an app link
+     * to the web page [service]. Needs a password + code login (this one).
+     */
+    fun pair(device: String, service: String, publicKey: String) = linkRequest("pair\t$device\t$service\t$publicKey")
+
+    /** Removes a paired device from the hub. */
+    fun unpair(device: String) = linkRequest("unpair\t$device")
+
+    private fun linkRequest(line: String) {
+        val s = session ?: throw IllegalStateException("not connected")
+        val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+            setHost("pair.securdp")
+            setPort(0)
+        }
+        val input = ch.inputStream
+        try {
+            ch.connect(10_000)
+            ch.outputStream.apply { write("$line\n".toByteArray()); flush() }
+            val reply = readLine(input) ?: throw Exception("This hub doesn't support app links (update it to 1.7)")
+            val f = reply.split("\t", limit = 2)
+            if (f[0] != "ok") throw Exception(f.getOrNull(1) ?: "The hub refused")
+        } finally {
+            ch.disconnect()
+        }
     }
 
     private fun readPseudo(host: String): String {

@@ -32,6 +32,7 @@ import (
 //	user: probe.user  password: Test-passphrase-123  TOTP secret: JBSWY3DPEHPK3PXP
 //	hub computers: desktop (default, echo) and laptop (greets "laptop;" then echoes).
 //	shared folders: media (read-only samples), drop (writable); web page: status.
+//	probe.four may pair app links (devices reaching "status" by key).
 func TestServeForExternalClient(t *testing.T) {
 	addr := os.Getenv("SECURDP_SERVE_ADDR")
 	if addr == "" {
@@ -71,6 +72,7 @@ func TestServeForExternalClient(t *testing.T) {
 		{Username: "probe.user", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
 		{Username: "probe.two", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
 		{Username: "probe.three", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
+		{Username: "probe.four", PasswordHash: hash, TOTPSecret: enc, Enabled: true, AppLinks: true},
 	}
 
 	// Files & web: "media" (read-only sample images, plus SECURDP_SERVE_MEDIA

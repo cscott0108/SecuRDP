@@ -138,6 +138,21 @@ Security:
 - Every file action is written to the activity log (`FILE user=… get "media/…"`).
 - Users without a grant get nothing, even if their app asks directly.
 
+### App links (1.7+, Android)
+
+An app link lets another app on your phone, such as one that runs in the background, reach **one** hub web page at `127.0.0.1:<port>` without your password or authenticator code.
+
+1. **On the hub**, add the page under *Files & Web* (e.g. `http://127.0.0.1:11435`), tick it for the user, and tick **App links** for that user on the *Users* tab.
+2. **On the phone**, connect to the hub normally (password + code). Under **App links**, tap **Link an app to …**, name the phone and pick the port (it defaults to the page's own port). Then tap **Pair**.
+3. The link appears on the app's main screen with an on/off switch. A quiet "App link ready" notification keeps the port listening, and the link restarts after a reboot.
+
+How it works and what it can't do:
+- Pairing creates an ECDSA P-256 key in the phone's **Android Keystore**, which can't be exported. Only the public key is sent to the hub, over the logged-in session.
+- A key login can reach **only its own page**. Remote Desktop, files, the computer list, other pages and pairing are all refused and logged.
+- The SSH connection opens only when an app connects, and closes a minute after the last connection ends. When the network changes, the next request simply logs in again.
+- **To revoke:** tap **Remove** on the phone (also removed on the hub if you're connected), or tap **Remove** next to the device on the hub's *Users* tab. Removing the page, ungranting it, or turning App links off for the user also stops the link. Unknown keys are logged but don't count towards IP bans.
+- Every app on the phone can reach a loopback port, so the page should check its own token. The link controls who reaches the hub, not which app on the phone uses it.
+
 ### Dynamic DNS (DuckDNS)
 
 *This PC → 5. Dynamic DNS*: sign in at duckdns.org, add a name, then paste the name and token. The service checks your public IP every 5 minutes and updates DuckDNS when it changes, plus a daily refresh. Clients then use `name.duckdns.org:port`. The token is stored encrypted, and DDNS events appear in the activity log.

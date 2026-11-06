@@ -39,6 +39,7 @@ type hubFixture struct {
 	port   int
 	fp     string
 	secret string
+	server *Server
 }
 
 func startHub(t *testing.T, mutate func(*config.Server)) hubFixture {
@@ -78,7 +79,7 @@ func startHub(t *testing.T, mutate func(*config.Server)) hubFixture {
 			go s.handle(ctx, c, sc)
 		}
 	}()
-	return hubFixture{ln.Addr().(*net.TCPAddr).Port, ssh.FingerprintSHA256(signer.PublicKey()), secret}
+	return hubFixture{ln.Addr().(*net.TCPAddr).Port, ssh.FingerprintSHA256(signer.PublicKey()), secret, s}
 }
 
 // greeting connects as login through the hub and returns the target's name.

@@ -86,6 +86,54 @@ type User struct {
 	// Files and web services are opt-in: only the names listed here.
 	Folders  []string `json:"folders,omitempty"`
 	Services []string `json:"services,omitempty"`
+	// AppLinks lets the user pair devices (see Device). Off by default.
+	AppLinks bool     `json:"app_links,omitempty"`
+	Devices  []Device `json:"devices,omitempty"`
+}
+
+// Device is an app link: a key held by one of the user's devices that may
+// reach a single granted web service without the password + code prompt
+// (for background apps). It can reach nothing else, and is paired from a
+// full password + code session.
+type Device struct {
+	Name    string `json:"name"`    // shown in the UI, unique per user
+	Key     string `json:"key"`     // public key, authorized_keys format
+	Service string `json:"service"` // the one web service it may reach
+	Added   int64  `json:"added"`   // unix time
+}
+
+// MaxDevices caps the paired devices per user.
+const MaxDevices = 10
+
+// ValidateDeviceName checks a device name: short, printable, no tabs/newlines.
+func ValidateDeviceName(n string) error {
+	if n == "" || len(n) > 40 || strings.ContainsAny(n, "\t\r\n") {
+		return errors.New("device name must be 1-40 characters")
+	}
+	return nil
+}
+
+// FindDevice returns the user's paired device with that name.
+func (u *User) FindDevice(name string) *Device {
+	for i := range u.Devices {
+		if strings.EqualFold(u.Devices[i].Name, name) {
+			return &u.Devices[i]
+		}
+	}
+	return nil
+}
+
+// RemoveDevice unpairs a device; it reports whether one was removed.
+func (u *User) RemoveDevice(name string) bool {
+	out := u.Devices[:0]
+	for _, d := range u.Devices {
+		if !strings.EqualFold(d.Name, name) {
+			out = append(out, d)
+		}
+	}
+	removed := len(out) != len(u.Devices)
+	u.Devices = out
+	return removed
 }
 
 // SharedFolder is a folder on the gate PC that granted users can browse.

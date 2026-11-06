@@ -21,6 +21,7 @@ const (
 	//   f \t name \t writable               (shared folders)
 	//   s \t name \t scheme \t path         (web services)
 	//   S \t name \t host:port              (a web service's own address, 1.6+)
+	//   A \t 1                              (the user may pair app links, 1.7+)
 	hubHost   = "hub.securdp"
 	filesHost = "files.securdp" // one file request per channel (see package files)
 	holdHost  = "hold.securdp"  // held open by a client browsing files or web pages
@@ -59,6 +60,9 @@ func (s *Server) sendHubInfo(nc ssh.NewChannel, user, loginComputer string) {
 				// keeps pre-1.6 clients (which skip unknown lines) working.
 				fmt.Fprintf(&b, "S\t%s\t%s\n", w.Name, hostport)
 			}
+		}
+		if u.AppLinks {
+			b.WriteString("A\t1\n")
 		}
 	}
 	io.WriteString(ch, b.String())

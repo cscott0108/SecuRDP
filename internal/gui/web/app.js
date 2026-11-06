@@ -388,6 +388,7 @@ function renderUsers() {
     );
     if (hub.mode === "hub") card.append(userAccess(u, hub.computers || []));
     if ((hub.folders || []).length || (hub.services || []).length) card.append(userGrants(u, hub));
+    if ((hub.services || []).length) card.append(userAppLinks(u));
     box.append(card);
   }
 }
@@ -414,6 +415,34 @@ function userGrants(u, hub) {
   if (fb.length) row.append(el("span", { class: "muted small" }, "Folders: "), ...fb.map((b, i) => el("label", { class: "check" }, b, el("span", {}, hub.folders[i].name))));
   if (sb.length) row.append(el("span", { class: "muted small" }, "Web pages: "), ...sb.map((b, i) => el("label", { class: "check" }, b, el("span", {}, hub.services[i].name))));
   return row;
+}
+
+// App links: devices (e.g. a phone app running in the background) that reach
+// one granted web page with a key instead of the password + code prompt.
+function userAppLinks(u) {
+  const cb = el("input", { type: "checkbox" });
+  cb.checked = !!u.app_links;
+  cb.addEventListener("change", () => run(null, async () => {
+    if (!cb.checked && (u.devices || []).length && !confirm(`Turn off app links for ${u.username}? This also removes their ${u.devices.length} paired device(s).`)) {
+      cb.checked = true;
+      return;
+    }
+    await api("users/applinks", { username: u.username, enabled: cb.checked });
+    await refresh();
+  }));
+  const box = el("div", { class: "access" },
+    el("label", { class: "check" }, cb, el("span", {}, "App links")),
+    el("span", { class: "muted small" }, " lets this user pair a device in the Android app, so a background app there can reach one of their web pages without a login. It can reach nothing else."));
+  for (const d of u.devices || []) {
+    box.append(el("div", { class: "row-between device" },
+      el("span", {}, "📱 ", el("b", {}, d.name), el("span", { class: "muted small" }, ` → ${d.service}, paired ${new Date(d.added * 1000).toLocaleDateString()}`)),
+      el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
+        if (!confirm(`Remove ${d.name}? Its app link stops working at once.`)) return;
+        await api("users/unpair", { username: u.username, device: d.name });
+        await refresh();
+      }) }, "Remove")));
+  }
+  return box;
 }
 
 // Files & Web tab (server settings).

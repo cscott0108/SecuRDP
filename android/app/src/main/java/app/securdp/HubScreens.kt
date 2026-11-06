@@ -116,6 +116,7 @@ fun HubScreen(
     onFolder: (String) -> Unit,
     onWeb: (HubService) -> Unit,
     onWebExternal: (HubService) -> Unit,
+    onPairLink: (HubService) -> Unit,
     onClose: () -> Unit,
 ) {
     BackHandler(onBack = onClose)
@@ -180,6 +181,19 @@ fun HubScreen(
                             TextButton(onClick = { onWebExternal(s) }) { Text("Open in Chrome ↗") }
                         }
                     }
+                }
+            }
+            if (info.appLinks && info.services.isNotEmpty()) {
+                item { SectionTitle("App links") }
+                item {
+                    Text(
+                        "Let an app on this phone (e.g. one running in the background) reach a web page here without logging in. " +
+                            "Each link reaches only its own page; remove it any time here or on the hub.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                items(info.services) { s ->
+                    OutlinedButton(onClick = { onPairLink(s) }, modifier = Modifier.fillMaxWidth()) { Text("🔗 Link an app to ${s.name}…") }
                 }
             }
         }

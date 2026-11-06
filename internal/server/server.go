@@ -38,6 +38,7 @@ type Server struct {
 	static   bool             // tests: never reload from disk
 	lastStep map[string]int64 // TOTP replay protection per user
 	sessions atomic.Int32
+	links    atomic.Int32 // app-link sessions (see applinks.go)
 }
 
 // LoadOrCreateHostKey returns the server's ed25519 host key, creating it once.
@@ -199,6 +200,7 @@ func (s *Server) sshConfig(signer ssh.Signer) *ssh.ServerConfig {
 			MACs:         []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM},
 		},
 		KeyboardInteractiveCallback: s.authenticate,
+		PublicKeyCallback:           s.keyLogin, // app links only
 		MaxAuthTries:                3,
 		ServerVersion:               "SSH-2.0-Gate",
 	}
@@ -289,19 +291,31 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 	c.SetDeadline(time.Time{})
 	defer conn.Close()
 
-	if n := s.sessions.Add(1); int(n) > s.config().MaxSessions {
-		s.sessions.Add(-1)
-		s.log.Printf("REJECT %s user=%s: max sessions reached", ip, conn.Permissions.Extensions["user"])
-		return
-	}
-	defer s.sessions.Add(-1)
-
 	user := conn.Permissions.Extensions["user"]
 	computer := conn.Permissions.Extensions["computer"]
+	device, service := conn.Permissions.Extensions["device"], conn.Permissions.Extensions["service"]
+	what := "computer=" + computer
+	if device != "" {
+		what = fmt.Sprintf("device=%q app link to %s", device, service)
+		if n := s.links.Add(1); n > maxLinkSessions {
+			s.links.Add(-1)
+			s.log.Printf("REJECT %s user=%s %s: too many app-link sessions", ip, user, what)
+			return
+		}
+		defer s.links.Add(-1)
+	} else {
+		if n := s.sessions.Add(1); int(n) > s.config().MaxSessions {
+			s.sessions.Add(-1)
+			s.log.Printf("REJECT %s user=%s: max sessions reached", ip, user)
+			return
+		}
+		defer s.sessions.Add(-1)
+	}
+
 	start := time.Now()
-	s.log.Printf("LOGIN %s user=%s computer=%s", ip, user, computer)
+	s.log.Printf("LOGIN %s user=%s %s", ip, user, what)
 	defer func() {
-		s.log.Printf("LOGOUT %s user=%s computer=%s after %s", ip, user, computer, time.Since(start).Round(time.Second))
+		s.log.Printf("LOGOUT %s user=%s %s after %s", ip, user, what, time.Since(start).Round(time.Second))
 	}()
 
 	// Refuse every global request (e.g. remote port forwarding).
@@ -346,26 +360,23 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 	// runs out with no new RDP connection, the whole tunnel is closed.
 	grace := time.Duration(s.config().IdleTimeoutMin) * time.Minute
 	tr := newTracker(grace, func() {
-		s.log.Printf("CLOSE %s user=%s: no Remote Desktop connection for %s", ip, user, grace)
+		s.log.Printf("CLOSE %s user=%s %s: idle for %s", ip, user, what, grace)
 		conn.Close()
 	})
 	defer tr.stop()
 
 	for nc := range chans {
+		if device != "" {
+			go s.linkChannel(nc, tr, user, device, service, ip, channelHost(nc))
+			continue
+		}
 		if nc.ChannelType() != "direct-tcpip" {
 			nc.Reject(ssh.Prohibited, "only RDP forwarding is permitted")
 			continue
 		}
 		// The requested host may name a hub computer (picker clients) or the
 		// special list address; anything else means the login's computer.
-		var d struct {
-			Host     string
-			Port     uint32
-			OrigHost string
-			OrigPort uint32
-		}
-		ssh.Unmarshal(nc.ExtraData(), &d)
-		host := strings.ToLower(d.Host)
+		host := channelHost(nc)
 		switch {
 		case host == listHost:
 			go s.sendComputerList(nc, user, computer)
@@ -375,6 +386,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 			continue
 		case host == filesHost:
 			go s.serveFiles(nc, tr, user, ip)
+			continue
+		case host == pairHost:
+			go s.pair(nc, user, ip)
 			continue
 		case host == holdHost:
 			go s.hold(nc, tr, user)
@@ -396,6 +410,18 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 		}
 		go s.forward(nc, tr, target)
 	}
+}
+
+// channelHost is the lower-cased destination host of a direct-tcpip channel.
+func channelHost(nc ssh.NewChannel) string {
+	var d struct {
+		Host     string
+		Port     uint32
+		OrigHost string
+		OrigPort uint32
+	}
+	ssh.Unmarshal(nc.ExtraData(), &d)
+	return strings.ToLower(d.Host)
 }
 
 // listHost is the pseudo destination a client opens to get its computer list.

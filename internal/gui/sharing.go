@@ -94,6 +94,7 @@ func saveService(r *http.Request) (any, error) {
 		}
 		if idx >= 0 {
 			renameGrant(cfg, func(u *config.User) *[]string { return &u.Services }, cfg.Services[idx].Name, w.Name)
+			renameDeviceService(cfg, cfg.Services[idx].Name, w.Name)
 			cfg.Services[idx] = w
 		} else {
 			cfg.Services = append(cfg.Services, w)
@@ -116,6 +117,7 @@ func deleteService(r *http.Request) (any, error) {
 		}
 		cfg.Services = out
 		renameGrant(cfg, func(u *config.User) *[]string { return &u.Services }, in.Name, "")
+		renameDeviceService(cfg, in.Name, "") // its app links stop working
 		return nil
 	})
 }
@@ -176,6 +178,65 @@ func setUserGrants(r *http.Request) (any, error) {
 			return errors.New("no such user")
 		}
 		u.Folders, u.Services = in.Folders, in.Services
+		return nil
+	})
+}
+
+// renameDeviceService follows a web page rename in paired devices; to == ""
+// (page deleted) unpairs them.
+func renameDeviceService(cfg *config.Server, from, to string) {
+	for i := range cfg.Users {
+		u := &cfg.Users[i]
+		out := u.Devices[:0]
+		for _, d := range u.Devices {
+			if strings.EqualFold(d.Service, from) {
+				if to == "" {
+					continue
+				}
+				d.Service = to
+			}
+			out = append(out, d)
+		}
+		u.Devices = out
+	}
+}
+
+// setAppLinks turns device pairing on or off for a user. Turning it off
+// also unpairs the user's devices, so turning it back on starts clean.
+func setAppLinks(r *http.Request) (any, error) {
+	in, err := decode[struct {
+		Username string `json:"username"`
+		Enabled  bool   `json:"enabled"`
+	}](r)
+	if err != nil {
+		return nil, err
+	}
+	return nil, withConfig(func(cfg *config.Server) error {
+		u := cfg.FindUser(in.Username)
+		if u == nil {
+			return errors.New("no such user")
+		}
+		u.AppLinks = in.Enabled
+		if !in.Enabled {
+			u.Devices = nil
+		}
+		return nil
+	})
+}
+
+func unpairDevice(r *http.Request) (any, error) {
+	in, err := decode[struct {
+		Username string `json:"username"`
+		Device   string `json:"device"`
+	}](r)
+	if err != nil {
+		return nil, err
+	}
+	return nil, withConfig(func(cfg *config.Server) error {
+		u := cfg.FindUser(in.Username)
+		if u == nil || !u.RemoveDevice(in.Device) {
+			return errors.New("no such device")
+		}
 		return nil
 	})
 }

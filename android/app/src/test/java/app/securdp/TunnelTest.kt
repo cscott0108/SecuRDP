@@ -196,7 +196,11 @@ class TunnelTest {
         )
     }
 
-    private fun totp(secret: String, stepOffset: Long = 0): String {
+    companion object {
+        fun totp(secret: String, stepOffset: Long = 0): String = TunnelTest().totp(secret, stepOffset)
+    }
+
+    internal fun totp(secret: String, stepOffset: Long = 0): String {
         val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
         var bits = 0L; var nbits = 0
         val key = java.io.ByteArrayOutputStream()

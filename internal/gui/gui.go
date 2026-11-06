@@ -247,6 +247,8 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/computers/wake", true, wakeComputer)
 	a.api(mux, "/api/users/access", true, setUserAccess)
 	a.api(mux, "/api/users/grants", true, setUserGrants)
+	a.api(mux, "/api/users/applinks", true, setAppLinks)
+	a.api(mux, "/api/users/unpair", true, unpairDevice)
 	a.api(mux, "/api/folders/save", true, saveFolder)
 	a.api(mux, "/api/folders/delete", true, deleteFolder)
 	a.api(mux, "/api/services/save", true, saveService)
@@ -266,12 +268,20 @@ func (a *app) routes() http.Handler {
 }
 
 type userView struct {
-	Username   string   `json:"username"`
-	Enabled    bool     `json:"enabled"`
-	Restricted bool     `json:"restricted"`
-	Computers  []string `json:"computers"`
-	Folders    []string `json:"folders"`
-	Services   []string `json:"services"`
+	Username   string       `json:"username"`
+	Enabled    bool         `json:"enabled"`
+	Restricted bool         `json:"restricted"`
+	Computers  []string     `json:"computers"`
+	Folders    []string     `json:"folders"`
+	Services   []string     `json:"services"`
+	AppLinks   bool         `json:"app_links"`
+	Devices    []deviceView `json:"devices"`
+}
+
+type deviceView struct {
+	Name    string `json:"name"`
+	Service string `json:"service"`
+	Added   int64  `json:"added"`
 }
 
 func (a *app) state(*http.Request) (any, error) {
@@ -296,8 +306,12 @@ func (a *app) state(*http.Request) (any, error) {
 		if err == nil {
 			users := []userView{}
 			for _, u := range cfg.Users {
+				devices := []deviceView{}
+				for _, d := range u.Devices {
+					devices = append(devices, deviceView{d.Name, d.Service, d.Added})
+				}
 				users = append(users, userView{u.Username, u.Enabled, u.Restricted, append([]string{}, u.Computers...),
-					append([]string{}, u.Folders...), append([]string{}, u.Services...)})
+					append([]string{}, u.Folders...), append([]string{}, u.Services...), u.AppLinks, devices})
 			}
 			st["hub"] = hubState(cfg)
 			st["settings"] = map[string]any{
