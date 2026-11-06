@@ -559,6 +559,10 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
     var trusted by remember { mutableStateOf(false) }
     var web by remember { mutableStateOf<WebView?>(null) }
     var progress by remember { mutableStateOf(0) } // 0-100 for the page being loaded
+    var localPort by remember { mutableStateOf(0) }
+    var unreachable by remember { mutableStateOf<String?>(null) }
+    val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    fun toast(m: String) = main.post { Toast.makeText(ctx, m, Toast.LENGTH_LONG).show() }
 
     // Forward a stable local port to the service and hold the tunnel open.
     DisposableEffect(service.name) {
@@ -569,12 +573,21 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                 val port = store.portFor(profile.name, "web:" + service.name)
                 t!!.listenService(service.name, port)
                 h = t.hold()
+                localPort = port
                 ready = "${service.scheme}://127.0.0.1:$port${service.path}"
             }.onFailure { error = it.message ?: "Couldn't open ${service.name}" }
         }
         onDispose { thread(isDaemon = true) { runCatching { h?.close() } } }
     }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
+
+    /** Decides where a navigation goes; true = handled here (don't load it in the view). */
+    fun route(view: WebView, url: String): Boolean = when (val r = routeLink(url, localPort, service.target)) {
+        LinkRoute.Tunnel, LinkRoute.Other -> false
+        is LinkRoute.Rewrite -> { view.loadUrl(r.url); true }
+        is LinkRoute.Unreachable -> { unreachable = r.host; true }
+        LinkRoute.Internet -> { openInBrowser(ctx, url); true }
+    }
 
     Scaffold(topBar = {
         TopAppBar(
@@ -583,6 +596,7 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
             actions = {
                 if (progress < 100 && ready != null) TextButton(onClick = { web?.stopLoading(); progress = 100 }) { Text("✕") }
                 else TextButton(onClick = { web?.reload() }) { Text("↻") }
+                TextButton(onClick = { TunnelManager.openExternal(ctx, profile, service, store) }) { Text("Chrome ↗") }
             },
         )
     }) { pad ->
@@ -604,12 +618,71 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                         settings.useWideViewPort = true
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
+                        // Galleries often open full-size images in a new tab/window.
+                        settings.setSupportMultipleWindows(true)
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        val mainView = this
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView, newProgress: Int) { progress = newProgress }
+
+                            // A "new window" is loaded in this view instead (Back returns to the gallery).
+                            override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
+                                val popup = WebView(view.context)
+                                popup.webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(v: WebView, req: android.webkit.WebResourceRequest): Boolean {
+                                        val u = req.url.toString()
+                                        if (!route(mainView, u)) mainView.loadUrl(u)
+                                        v.destroy()
+                                        return true
+                                    }
+
+                                    override fun onPageStarted(v: WebView, u: String?, favicon: android.graphics.Bitmap?) {
+                                        if (u != null && u != "about:blank") {
+                                            v.stopLoading()
+                                            if (!route(mainView, u)) mainView.loadUrl(u)
+                                            v.destroy()
+                                        }
+                                    }
+                                }
+                                (resultMsg.obj as WebView.WebViewTransport).webView = popup
+                                resultMsg.sendToTarget()
+                                return true
+                            }
+                        }
+                        // Downloads ("save", "original image") go to the phone's Downloads/SecuRDP.
+                        setDownloadListener { dlUrl, userAgent, disposition, mime, _ ->
+                            val target = when (val r = routeLink(dlUrl, localPort, service.target)) {
+                                is LinkRoute.Rewrite -> r.url
+                                LinkRoute.Tunnel -> dlUrl
+                                else -> null
+                            }
+                            if (target == null) {
+                                toast("This download needs the browser - tap Chrome ↗ at the top and try it there.")
+                            } else {
+                                toast("Downloading…")
+                                thread(isDaemon = true) {
+                                    runCatching { downloadThroughTunnel(ctx, target, userAgent, disposition, mime, trusted) }
+                                        .onSuccess { (name, uri) ->
+                                            toast("Saved $name to Downloads/SecuRDP")
+                                            main.post { openDownloaded(ctx, uri, name) }
+                                        }
+                                        .onFailure { toast(it.message ?: "Download failed") }
+                                }
+                            }
                         }
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) { progress = 0 }
                             override fun onPageFinished(view: WebView, url: String?) { progress = 100 }
+
+                            override fun shouldOverrideUrlLoading(view: WebView, req: android.webkit.WebResourceRequest): Boolean =
+                                route(view, req.url.toString())
+
+                            // Images/scripts the page loads from its real home address come through the tunnel too.
+                            override fun shouldInterceptRequest(view: WebView, req: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
+                                if (!req.method.equals("GET", true)) return null
+                                val r = routeLink(req.url.toString(), localPort, service.target)
+                                return if (r is LinkRoute.Rewrite) tunnelResponse(r.url, req.requestHeaders, trusted) else null
+                            }
 
                             // Home devices often use self-signed certificates: ask once per page visit.
                             @SuppressLint("WebViewClientOnReceivedSslError")
@@ -623,6 +696,19 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                 })
             }
         }
+    }
+    unreachable?.let { host ->
+        AlertDialog(
+            onDismissRequest = { unreachable = null },
+            title = { Text("Can't open that link") },
+            text = {
+                Text(
+                    "It points to $host on your home network, which isn't part of this web page's tunnel. " +
+                        "To reach it, add that address as its own web page on the hub (Files & Web tab).",
+                )
+            },
+            confirmButton = { TextButton(onClick = { unreachable = null }) { Text("OK") } },
+        )
     }
     sslAsk?.let { h ->
         AlertDialog(

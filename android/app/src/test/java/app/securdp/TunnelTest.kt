@@ -177,6 +177,11 @@ class TunnelTest {
         assertEquals(HubComputer("desktop", true, true), info.computers.single())
         assertEquals(HubFolder("media", false), info.folders.single())
         assertEquals(HubService("router", "https", "/admin"), info.services.single())
+        // 1.6 hubs add the page's own address on an "S" line.
+        assertEquals(
+            HubService("router", "https", "/admin", "192.168.1.254:443"),
+            parseHubInfo("s\trouter\thttps\t/admin\nS\trouter\t192.168.1.254:443\n").services.single(),
+        )
         assertEquals(
             listOf(HubFile("My File.txt", false, 12, 1700000000), HubFile("Sub", true, 0, 1)),
             parseListing("f\t12\t1700000000\tMy File.txt\nd\t0\t1\tSub\n"),
