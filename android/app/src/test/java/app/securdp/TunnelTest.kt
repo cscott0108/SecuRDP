@@ -127,6 +127,62 @@ class TunnelTest {
         }
     }
 
+    /** Hub files + web pages against the test gate (shared folders "media"/"drop", page "status"). */
+    @Test
+    fun filesAndWebAgainstTestGate() {
+        val e2ePort: Int = System.getProperty("securdp.e2e.port")?.toInt()
+            ?: run { assumeTrue("set -Dsecurdp.e2e.port", false); return }
+        val pinned = try {
+            Tunnel("127.0.0.1", e2ePort, "probe.three", "", 0, noop).connect("x", "000000")
+            error("expected UnknownHostException")
+        } catch (e: UnknownHostException) {
+            e.fingerprint
+        }
+        // Its own test user, so codes used by the other live tests don't count as replays.
+        val t = Tunnel("127.0.0.1", e2ePort, "probe.three", pinned, 0, noop)
+        t.connect("Test-passphrase-123", totp("JBSWY3DPEHPK3PXP"))
+        try {
+            val info = t.info()
+            assertEquals(listOf("media", "drop"), info.folders.map { it.name })
+            assertEquals(listOf(false, true), info.folders.map { it.writable })
+            assertEquals("status", info.services.single().name)
+
+            val media = t.list("media")
+            assert(media.any { it.name == "photo-1.png" && !it.dir }) { "listing: $media" }
+            assert(media.any { it.name == "Holiday" && it.dir })
+            val jpeg = t.thumb("media/photo-1.png", 128)
+            assert(jpeg.size > 100 && jpeg[0] == 0xFF.toByte() && jpeg[1] == 0xD8.toByte()) { "not a JPEG" }
+            t.get("media/Holiday/notes.txt").use { assertEquals("packing list", it.body.readBytes().toString(Charsets.UTF_8)) }
+
+            val data = "from android".toByteArray()
+            t.put("drop/android.txt", data.size.toLong(), data.inputStream())
+            t.rename("drop/android.txt", "drop/renamed.txt")
+            assertEquals(listOf("renamed.txt"), t.list("drop").map { it.name })
+            t.delete("drop/renamed.txt")
+            try { t.delete("media/photo-1.png"); fail("deleted in a read-only folder") } catch (_: Exception) {}
+            try { t.list("media/../.."); } catch (_: Exception) {}
+
+            t.hold().close()
+            t.listenService("status", 13452)
+            val page = java.net.URL("http://127.0.0.1:13452/").readText()
+            assert("Home status page" in page) { page }
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test
+    fun parsesHubInfoAndListing() {
+        val info = parseHubInfo("c\tdesktop\t1\t1\nf\tmedia\t0\ns\trouter\thttps\t/admin\nbad line\n")
+        assertEquals(HubComputer("desktop", true, true), info.computers.single())
+        assertEquals(HubFolder("media", false), info.folders.single())
+        assertEquals(HubService("router", "https", "/admin"), info.services.single())
+        assertEquals(
+            listOf(HubFile("My File.txt", false, 12, 1700000000), HubFile("Sub", true, 0, 1)),
+            parseListing("f\t12\t1700000000\tMy File.txt\nd\t0\t1\tSub\n"),
+        )
+    }
+
     @Test
     fun parsesComputerList() {
         assertEquals(
@@ -135,7 +191,7 @@ class TunnelTest {
         )
     }
 
-    private fun totp(secret: String): String {
+    private fun totp(secret: String, stepOffset: Long = 0): String {
         val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
         var bits = 0L; var nbits = 0
         val key = java.io.ByteArrayOutputStream()
@@ -143,7 +199,7 @@ class TunnelTest {
             bits = (bits shl 5) or alphabet.indexOf(c).toLong(); nbits += 5
             if (nbits >= 8) { key.write(((bits shr (nbits - 8)) and 0xff).toInt()); nbits -= 8 }
         }
-        val step = System.currentTimeMillis() / 1000 / 30
+        val step = System.currentTimeMillis() / 1000 / 30 + stepOffset
         val mac = javax.crypto.Mac.getInstance("HmacSHA1").apply { init(javax.crypto.spec.SecretKeySpec(key.toByteArray(), "HmacSHA1")) }
         val h = mac.doFinal(java.nio.ByteBuffer.allocate(8).putLong(step).array())
         val off = h[h.size - 1].toInt() and 0xf

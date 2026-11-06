@@ -39,7 +39,9 @@ type Tunnel struct {
 	Computer  string // hub computer being forwarded to ("" = the login's)
 	profile   config.Profile
 	ssh       *ssh.Client
-	ln        net.Listener
+	mu        sync.Mutex
+	listeners []net.Listener
+	uses      atomic.Int32
 	active    atomic.Int32
 	used      atomic.Bool
 	closeOnce sync.Once
@@ -164,33 +166,57 @@ func (t *Tunnel) Computers() ([]HubComputer, error) {
 // Listen starts the local listener for computer ("" = the login's computer)
 // on a stable loopback address, so Remote Desktop's saved login sticks.
 func (t *Tunnel) Listen(computer, localIP string) error {
+	// A computer name asks the hub for that PC; 127.0.0.1 means "the
+	// computer I logged in to" (and is what older gates expect).
+	dest := "127.0.0.1:3389"
+	if computer != "" {
+		dest = computer + ":3389"
+	}
+	ln, err := t.listenLocal(localIP, 13389, dest, true)
+	if err != nil {
+		return err
+	}
+	t.Computer, t.LocalAddr = computer, ln.Addr().String()
+	return nil
+}
+
+// ListenService forwards a local port to the hub's web service name and
+// returns the local host:port to open in a browser.
+func (t *Tunnel) ListenService(name, localIP string) (string, error) {
+	ln, err := t.listenLocal(localIP, 18080, "svc."+name+":0", false)
+	if err != nil {
+		return "", err
+	}
+	return ln.Addr().String(), nil
+}
+
+// listenLocal binds the first free port from firstPort on localIP and
+// forwards each connection to dest through the tunnel. rdp connections are
+// counted for the auto-close-after-Remote-Desktop logic.
+func (t *Tunnel) listenLocal(localIP string, firstPort int, dest string, rdp bool) (net.Listener, error) {
 	if localIP == "" {
 		localIP = "127.0.0.1"
 	}
 	var ln net.Listener
 	var err error
-	for port := 13389; port < 13400 && ln == nil; port++ {
+	for port := firstPort; port < firstPort+20 && ln == nil; port++ {
 		ln, _ = net.Listen("tcp", fmt.Sprintf("%s:%d", localIP, port))
 	}
 	if ln == nil {
 		if ln, err = net.Listen("tcp", localIP+":0"); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	t.ln, t.Computer, t.LocalAddr = ln, computer, ln.Addr().String()
-	go t.accept()
-	return nil
+	t.mu.Lock()
+	t.listeners = append(t.listeners, ln)
+	t.mu.Unlock()
+	go t.serve(ln, dest, rdp)
+	return ln, nil
 }
 
-func (t *Tunnel) accept() {
-	// A computer name asks the hub for that PC; 127.0.0.1 means "the
-	// computer I logged in to" (and is what older gates expect).
-	dest := "127.0.0.1:3389"
-	if t.Computer != "" {
-		dest = t.Computer + ":3389"
-	}
+func (t *Tunnel) serve(ln net.Listener, dest string, rdp bool) {
 	for {
-		lc, err := t.ln.Accept()
+		lc, err := ln.Accept()
 		if err != nil {
 			return
 		}
@@ -201,9 +227,11 @@ func (t *Tunnel) accept() {
 				return
 			}
 			defer rc.Close()
-			t.used.Store(true)
-			t.active.Add(1)
-			defer t.active.Add(-1)
+			if rdp {
+				t.used.Store(true)
+				t.active.Add(1)
+				defer t.active.Add(-1)
+			}
 			var wg sync.WaitGroup
 			wg.Add(2)
 			go func() { io.Copy(rc, lc); rc.Close(); wg.Done() }()
@@ -229,17 +257,29 @@ func (t *Tunnel) keepalive() {
 	}
 }
 
-func (t *Tunnel) Active() int        { return int(t.active.Load()) }
+func (t *Tunnel) Active() int           { return int(t.active.Load()) }
 func (t *Tunnel) Done() <-chan struct{} { return t.done }
 
 func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
-		if t.ln != nil {
-			t.ln.Close()
+		t.mu.Lock()
+		for _, ln := range t.listeners {
+			ln.Close()
 		}
+		t.mu.Unlock()
 		t.ssh.Close()
 		close(t.done)
 	})
+}
+
+// Acquire / Release count what is using the tunnel (a Remote Desktop
+// window, a file browser, a web page window). The last Release closes it.
+func (t *Tunnel) Acquire() { t.uses.Add(1) }
+
+func (t *Tunnel) Release() {
+	if t.uses.Add(-1) <= 0 {
+		t.Close()
+	}
 }
 
 // LaunchRDP starts mstsc against the tunnel and closes the tunnel once
@@ -253,6 +293,7 @@ func (t *Tunnel) LaunchRDP() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	t.Acquire()
 	go func() {
 		cmd.Wait()
 		// Give mstsc a moment in case it handed off to another process.
@@ -263,7 +304,7 @@ func (t *Tunnel) LaunchRDP() error {
 				return
 			case <-time.After(2 * time.Second):
 				if t.Active() == 0 {
-					t.Close()
+					t.Release() // closes the tunnel unless files/web are in use
 					return
 				}
 			}

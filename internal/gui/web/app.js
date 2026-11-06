@@ -117,6 +117,7 @@ function render() {
   renderVersions(s);
 
   renderHub(s);
+  renderSharing(s);
   renderUsers();
   renderProfiles();
   if (s.log !== undefined) {
@@ -359,7 +360,7 @@ $("ddns-copy").addEventListener("click", () => copyAddr($("ddns-addr-text").text
 let usersSig = "";
 function renderUsers() {
   const hub = state.hub || {};
-  const sig = JSON.stringify([state.users, hub.mode, hub.computers]);
+  const sig = JSON.stringify([state.users, hub.mode, hub.computers, hub.folders, hub.services]);
   if (sig === usersSig) return;
   usersSig = sig;
   const box = $("users");
@@ -385,9 +386,109 @@ function renderUsers() {
       )
     );
     if (hub.mode === "hub") card.append(userAccess(u, hub.computers || []));
+    if ((hub.folders || []).length || (hub.services || []).length) card.append(userGrants(u, hub));
     box.append(card);
   }
 }
+
+// Files & web pages a user may use (off until ticked).
+function userGrants(u, hub) {
+  const make = (list, granted) => list.map((x) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = (granted || []).includes(x.name);
+    cb.dataset.name = x.name;
+    return cb;
+  });
+  const fb = make(hub.folders || [], u.folders), sb = make(hub.services || [], u.services);
+  const save = () => run(null, async () => {
+    await api("users/grants", {
+      username: u.username,
+      folders: fb.filter((b) => b.checked).map((b) => b.dataset.name),
+      services: sb.filter((b) => b.checked).map((b) => b.dataset.name),
+    });
+    await refresh();
+  });
+  [...fb, ...sb].forEach((b) => b.addEventListener("change", save));
+  const row = el("div", { class: "access" });
+  if (fb.length) row.append(el("span", { class: "muted small" }, "Folders: "), ...fb.map((b, i) => el("label", { class: "check" }, b, el("span", {}, hub.folders[i].name))));
+  if (sb.length) row.append(el("span", { class: "muted small" }, "Web pages: "), ...sb.map((b, i) => el("label", { class: "check" }, b, el("span", {}, hub.services[i].name))));
+  return row;
+}
+
+// Files & Web tab (server settings).
+let sharingSig = "";
+function renderSharing(s) {
+  const hub = s.hub;
+  if (!hub) return;
+  const sig = JSON.stringify([hub.folders, hub.services]);
+  if (sig === sharingSig) return;
+  sharingSig = sig;
+  const fbox = $("folders");
+  fbox.innerHTML = "";
+  if (!(hub.folders || []).length) fbox.append(el("p", { class: "muted" }, "No shared folders."));
+  for (const f of hub.folders || []) {
+    fbox.append(el("div", { class: "item-row" },
+      el("div", {}, el("b", {}, f.name), " ", el("span", { class: "pill " + (f.writable ? "bad" : "good") }, f.writable ? "read & write" : "read-only"),
+        el("div", { class: "muted small" }, f.path)),
+      el("div", { class: "actions tight" },
+        el("button", { onclick: () => editFolder(f) }, "Edit"),
+        el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
+          if (!confirm(`Stop sharing ${f.name}? (The folder itself isn't touched.)`)) return;
+          await api("folders/delete", { name: f.name });
+          await refresh();
+        }) }, "Stop sharing"))));
+  }
+  const sbox = $("services");
+  sbox.innerHTML = "";
+  if (!(hub.services || []).length) sbox.append(el("p", { class: "muted" }, "No web pages."));
+  for (const w of hub.services || []) {
+    sbox.append(el("div", { class: "item-row" },
+      el("div", {}, el("b", {}, w.name), el("div", { class: "muted small" }, w.url)),
+      el("div", { class: "actions tight" },
+        el("button", { onclick: (e) => run(e.target, async () => { const r = await api("services/test", { name: w.name }); toast(r.message, r.ok ? "ok" : "err"); }) }, "Test"),
+        el("button", { onclick: () => editService(w) }, "Edit"),
+        el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
+          if (!confirm(`Remove ${w.name}?`)) return;
+          await api("services/delete", { name: w.name });
+          await refresh();
+        }) }, "Remove"))));
+  }
+}
+function editFolder(f) {
+  $("folder-form").classList.remove("hidden");
+  $("ff-original").value = f ? f.name : "";
+  $("ff-name").value = f ? f.name : "";
+  $("ff-path").value = f ? f.path : "";
+  $("ff-writable").checked = f ? !!f.writable : false;
+  $("ff-name").focus();
+}
+function editService(w) {
+  $("service-form").classList.remove("hidden");
+  $("sf-original").value = w ? w.name : "";
+  $("sf-name").value = w ? w.name : "";
+  $("sf-url").value = w ? w.url : "";
+  $("sf-name").focus();
+}
+$("add-folder").addEventListener("click", () => editFolder(null));
+$("add-service").addEventListener("click", () => editService(null));
+$("ff-cancel").addEventListener("click", () => $("folder-form").classList.add("hidden"));
+$("sf-cancel").addEventListener("click", () => $("service-form").classList.add("hidden"));
+["ff-name", "sf-name"].forEach((id) => $(id).addEventListener("input", (e) => (e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))));
+$("ff-save").addEventListener("click", (e) => run(e.target, async () => {
+  if ($("ff-writable").checked && !confirm("Allow users with access to upload, rename and delete files in this folder?")) return;
+  await api("folders/save", { original: $("ff-original").value, folder: { name: $("ff-name").value, path: $("ff-path").value, writable: $("ff-writable").checked } });
+  $("folder-form").classList.add("hidden");
+  toast("Saved. Tick it for users on the Users tab.");
+  await refresh();
+}));
+$("sf-save").addEventListener("click", (e) => run(e.target, async () => {
+  const name = $("sf-name").value;
+  await api("services/save", { original: $("sf-original").value, service: { name, url: $("sf-url").value } });
+  $("service-form").classList.add("hidden");
+  const r = await api("services/test", { name });
+  toast(r.ok ? `Saved. ${r.message}. Tick it for users on the Users tab.` : `Saved, but: ${r.message}`, r.ok ? "ok" : "err");
+  await refresh();
+}));
 
 // Hub mode: which computers a user may reach.
 function userAccess(u, computers) {
@@ -524,7 +625,7 @@ $("uw-code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("uw-c
 let profilesSig = "";
 function renderProfiles() {
   // Only rebuild when something changed, so a half-typed password isn't wiped by the poll.
-  const sig = JSON.stringify([state.profiles, state.connected]);
+  const sig = JSON.stringify([state.profiles, state.connected, Object.keys(state.hubs || {})]);
   if (sig === profilesSig) return;
   profilesSig = sig;
   const box = $("profiles");
@@ -557,6 +658,9 @@ function renderProfiles() {
             el("div", { class: "muted small" }, `${p.host}:${p.port} · gate user ${p.username}` + (p.computer ? ` · always ${p.computer}` : "") + (p.rdp_username ? ` · Windows user ${p.rdp_username}` : "") + (p.host_fingerprint ? " · identity verified" : " · not yet verified"))
           ),
           el("div", { class: "actions tight" },
+            local && (state.hubs || {})[p.name]
+              ? el("button", { class: "primary", onclick: () => openHub(p.name, state.hubs[p.name]) }, "Open hub")
+              : "",
             local
               ? el("button", { class: "danger", onclick: (e) => run(e.target, async () => { await api("disconnect", { name: p.name }); await refresh(); }) }, "Disconnect")
               : el("button", { class: "primary", onclick: () => { form.classList.toggle("hidden"); pw.focus(); } }, "Connect…"),
@@ -568,7 +672,9 @@ function renderProfiles() {
             }) }, "Delete")
           )
         ),
-        local ? el("div", { class: "muted small" }, `Tunnel open at ${local}. Close Remote Desktop to end the session.`) : form
+        local ? el("div", { class: "muted small" }, (state.hubs || {})[p.name]
+          ? "Connected to the hub. The connection closes after you click Done and nothing (Remote Desktop, files, web pages) is open."
+          : `Tunnel open at ${local}. Close Remote Desktop to end the session.`) : form
       )
     );
   }
@@ -582,31 +688,39 @@ async function connect(name, password, code, trust) {
     $("fp-modal").classList.remove("hidden");
     return;
   }
-  if (r.status === "choose") {
-    showPicker(name, r.computers);
+  if (r.status === "hub") {
+    openHub(name, r.info);
+    await refresh();
     return;
   }
   toast("Connected. Remote Desktop is opening…");
   await refresh();
 }
 
-// Hub picker: the hub sent the computers this login may reach.
-let pickerFor = null;
-function showPicker(name, computers) {
-  pickerFor = name;
+// ---------- hub screen ----------
+const hubView = { name: null, info: null, path: "", entries: [], sortDir: 1 };
+const store = {
+  get: (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+};
+
+function openHub(name, info) {
+  hubView.name = name;
+  hubView.info = info;
+  $("hub-title").textContent = name;
   $("pick-remember").checked = false;
-  const box = $("pick-list");
-  box.innerHTML = "";
-  for (const c of computers) {
-    box.append(el("button", {
+  const comps = info.computers || [], folders = info.folders || [], services = info.services || [];
+  $("hub-rdp-sec").classList.toggle("hidden", !comps.length);
+  $("hub-files-sec").classList.toggle("hidden", !folders.length);
+  $("hub-web-sec").classList.toggle("hidden", !services.length);
+  $("hub-rdp").innerHTML = "";
+  for (const c of comps) {
+    $("hub-rdp").append(el("button", {
       class: "pick" + (c.default ? " is-default" : ""),
       onclick: (e) => run(e.target, async () => {
-        $("pick-modal").classList.add("hidden");
-        pickerFor = null;
-        await api("connect/choose", { name, computer: c.name, remember: $("pick-remember").checked });
-        toast(c.online ? `Connected to ${c.name}. Remote Desktop is opening…`
+        await api("hub/rdp", { name, computer: c.name, remember: $("pick-remember").checked });
+        toast(c.online ? `Remote Desktop to ${c.name} is opening…`
           : `Connecting to ${c.name} - it didn't answer just now; if it's asleep the hub is waking it, so retry in a minute if Remote Desktop can't reach it.`);
-        await refresh();
       }),
     },
       el("span", { class: "dot " + (c.online ? "on" : "off") }),
@@ -614,13 +728,244 @@ function showPicker(name, computers) {
       el("span", { class: "muted small" }, (c.online ? "online" : "not answering") + (c.default ? " · default" : ""))
     ));
   }
-  $("pick-modal").classList.remove("hidden");
+  $("hub-folders").innerHTML = "";
+  for (const f of folders) {
+    $("hub-folders").append(el("button", { class: "tile", onclick: () => openFiles(f.name) },
+      el("span", { class: "ico" }, "📁"), el("span", {}, el("b", {}, f.name), el("div", { class: "muted small" }, f.writable ? "read & write" : "read-only"))));
+  }
+  $("hub-web").innerHTML = "";
+  for (const s of services) {
+    $("hub-web").append(el("button", {
+      class: "tile",
+      onclick: (e) => run(e.target, async () => { await api("hub/web", { name, service: s.name }); toast(`Opening ${s.name}…`); }),
+    }, el("span", { class: "ico" }, "🌐"), el("span", {}, el("b", {}, s.name), el("div", { class: "muted small" }, s.scheme + " · " + (s.path || "/")))));
+  }
+  showHubPane("home");
+  $("hub-view").classList.remove("hidden");
 }
-$("pick-cancel").addEventListener("click", () => run(null, async () => {
-  $("pick-modal").classList.add("hidden");
-  if (pickerFor) await api("connect/choose", { name: pickerFor, computer: "" });
-  pickerFor = null;
+
+function showHubPane(which) {
+  $("hub-home").classList.toggle("hidden", which !== "home");
+  $("hub-files").classList.toggle("hidden", which !== "files");
+  $("hub-back").classList.toggle("hidden", which === "home");
+}
+
+async function leaveFiles() {
+  if (hubView.path !== null && !$("hub-files").classList.contains("hidden")) {
+    await api("files/browse", { name: hubView.name, on: false }).catch(() => {});
+  }
+  closeFileMenu();
+  showHubPane("home");
+}
+
+$("hub-back").addEventListener("click", () => run(null, leaveFiles));
+$("hub-done").addEventListener("click", (e) => run(e.target, async () => {
+  await leaveFiles();
+  $("hub-view").classList.add("hidden");
+  await api("hub/done", { name: hubView.name });
+  await refresh();
 }));
+$("hub-disconnect").addEventListener("click", (e) => run(e.target, async () => {
+  $("hub-view").classList.add("hidden");
+  await api("disconnect", { name: hubView.name });
+  await refresh();
+}));
+
+// ---------- file browser ----------
+const EXT = {
+  image: "jpg jpeg png gif bmp webp heic tif tiff svg",
+  video: "mp4 m4v mov mkv avi wmv webm mpg mpeg 3gp ts",
+  audio: "mp3 wav flac m4a aac ogg wma opus",
+  archive: "zip rar 7z tar gz bz2 xz iso",
+  doc: "pdf doc docx xls xlsx ppt pptx txt rtf odt ods md csv",
+  code: "js ts go py java kt cs cpp c h html css json xml yml yaml ps1 bat sh",
+  app: "exe msi apk dll",
+};
+const ICON = { folder: "📁", image: "🖼️", video: "🎬", audio: "🎵", archive: "🗜️", doc: "📄", code: "📝", app: "⚙️", file: "📄" };
+const THUMBABLE = new Set((EXT.image + " " + EXT.video).split(" ").filter((x) => x !== "svg"));
+function extOf(n) { const i = n.lastIndexOf("."); return i > 0 ? n.slice(i + 1).toLowerCase() : ""; }
+function kindOf(e) {
+  if (e.dir) return "folder";
+  const x = extOf(e.name);
+  for (const [k, list] of Object.entries(EXT)) if (list.split(" ").includes(x)) return k;
+  return "file";
+}
+function typeLabel(e) { return e.dir ? "Folder" : (extOf(e.name) ? extOf(e.name).toUpperCase() + " file" : "File"); }
+function fmtSize(n) {
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
+}
+function fmtDate(t) { return t ? new Date(t * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : ""; }
+function joinPath(a, b) { return a ? a + "/" + b : b; }
+function writableHere() {
+  const root = hubView.path.split("/")[0];
+  return !!(hubView.info.folders || []).find((f) => f.name === root && f.writable) && hubView.path.length > 0;
+}
+
+async function openFiles(folder) {
+  await api("files/browse", { name: hubView.name, on: true });
+  $("fb-view").value = store.get("fb-view", "icons");
+  $("fb-sort").value = store.get("fb-sort", "name");
+  showHubPane("files");
+  await loadDir(folder);
+}
+
+async function loadDir(path) {
+  hubView.path = path;
+  $("fb-status").textContent = "Loading…";
+  hubView.entries = await api("files/list", { name: hubView.name, path });
+  renderCrumbs();
+  const w = writableHere();
+  $("fb-upload").classList.toggle("hidden", !w);
+  $("fb-mkdir").classList.toggle("hidden", !w);
+  renderItems();
+}
+
+function renderCrumbs() {
+  const box = $("fb-crumbs");
+  box.innerHTML = "";
+  const parts = hubView.path.split("/");
+  parts.forEach((p, i) => {
+    if (i) box.append(el("span", { class: "sep" }, "›"));
+    const target = parts.slice(0, i + 1).join("/");
+    box.append(el("button", { onclick: () => run(null, () => loadDir(target)) }, i === 0 ? "📁 " + p : p));
+  });
+}
+
+function sorted() {
+  const by = $("fb-sort").value, dir = hubView.sortDir;
+  const key = {
+    name: (e) => e.name.toLowerCase(),
+    date: (e) => e.mtime,
+    size: (e) => e.size,
+    type: (e) => typeLabel(e).toLowerCase() + e.name.toLowerCase(),
+  }[by];
+  return [...hubView.entries].sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1; // folders first, like Explorer
+    const x = key(a), y = key(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * dir;
+  });
+}
+
+function thumbEl(e, px) {
+  const icon = el("span", {}, ICON[kindOf(e)]);
+  const box = el("span", { class: "thumb" }, icon);
+  if (!e.dir && THUMBABLE.has(extOf(e.name))) {
+    // The image must be in the page for lazy loading to fetch it; it stays
+    // hidden behind the type icon until it arrives.
+    const img = el("img", { loading: "lazy", alt: "", class: "pending", src: `/dl/thumb?t=${encodeURIComponent(TOKEN)}&name=${encodeURIComponent(hubView.name)}&path=${encodeURIComponent(joinPath(hubView.path, e.name))}&px=${px}` });
+    img.addEventListener("load", () => { icon.remove(); img.classList.remove("pending"); });
+    box.append(img);
+  }
+  return box;
+}
+
+function renderItems() {
+  const view = $("fb-view").value;
+  const box = $("fb-items");
+  box.innerHTML = "";
+  const items = sorted();
+  $("fb-status").textContent = `${items.length} item${items.length === 1 ? "" : "s"}` + (writableHere() ? "" : " · read-only");
+  const activate = (e, ev) => (e.dir ? run(null, () => loadDir(joinPath(hubView.path, e.name))) : openFileMenu(e, ev));
+  if (view === "details") {
+    const head = (label, key, cls) => el("th", { class: cls || "", onclick: () => setSort(key) }, label + ($("fb-sort").value === key ? (hubView.sortDir > 0 ? " ▲" : " ▼") : ""));
+    const table = el("table", { class: "fb-details" },
+      el("thead", {}, el("tr", {}, head("Name", "name"), head("Date modified", "date"), head("Type", "type"), head("Size", "size", "num"))));
+    const tb = el("tbody");
+    for (const e of items) {
+      const tr = el("tr", { class: "fi" },
+        el("td", { class: "nm" }, thumbEl(e, 64), el("span", {}, e.name)),
+        el("td", {}, fmtDate(e.mtime)), el("td", {}, typeLabel(e)), el("td", { class: "num" }, e.dir ? "" : fmtSize(e.size)));
+      tr.addEventListener("click", (ev) => activate(e, ev));
+      tr.addEventListener("contextmenu", (ev) => { ev.preventDefault(); openFileMenu(e, ev); });
+      tb.append(tr);
+    }
+    table.append(tb);
+    box.append(table);
+    return;
+  }
+  const wrap = el("div", { class: view === "list" ? "fb-list" : "fb-icons" });
+  for (const e of items) {
+    const b = el("button", { class: "fi", title: `${e.name}\n${typeLabel(e)}${e.dir ? "" : " · " + fmtSize(e.size)}\n${fmtDate(e.mtime)}` },
+      thumbEl(e, view === "list" ? 64 : 256), el("span", { class: "fname" }, e.name));
+    b.addEventListener("click", (ev) => activate(e, ev));
+    b.addEventListener("contextmenu", (ev) => { ev.preventDefault(); openFileMenu(e, ev); });
+    wrap.append(b);
+  }
+  box.append(wrap);
+}
+
+function setSort(key) {
+  if ($("fb-sort").value === key) hubView.sortDir *= -1;
+  else { $("fb-sort").value = key; hubView.sortDir = 1; store.set("fb-sort", key); }
+  renderItems();
+}
+
+$("fb-view").addEventListener("change", () => { store.set("fb-view", $("fb-view").value); renderItems(); });
+$("fb-sort").addEventListener("change", () => { hubView.sortDir = 1; store.set("fb-sort", $("fb-sort").value); renderItems(); });
+$("fb-refresh").addEventListener("click", () => run(null, () => loadDir(hubView.path)));
+$("fb-mkdir").addEventListener("click", () => run(null, async () => {
+  const n = prompt("New folder name:");
+  if (!n) return;
+  await api("files/mkdir", { name: hubView.name, path: joinPath(hubView.path, n.trim()) });
+  await loadDir(hubView.path);
+}));
+$("fb-upload").addEventListener("click", () => $("fb-file").click());
+$("fb-file").addEventListener("change", () => run(null, async () => {
+  const files = [...$("fb-file").files];
+  $("fb-file").value = "";
+  for (const [i, f] of files.entries()) {
+    $("fb-status").textContent = `Uploading ${f.name} (${i + 1} of ${files.length})…`;
+    const r = await fetch(`/api/files/upload?name=${encodeURIComponent(hubView.name)}&path=${encodeURIComponent(joinPath(hubView.path, f.name))}`,
+      { method: "POST", headers: { "X-Token": TOKEN }, body: f });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(`${f.name}: ${d.error || r.statusText}`);
+    }
+  }
+  toast(`Uploaded ${files.length} file${files.length === 1 ? "" : "s"}.`);
+  await loadDir(hubView.path);
+}));
+
+function closeFileMenu() { $("fb-menu").classList.add("hidden"); }
+document.addEventListener("click", (e) => { if (!e.target.closest("#fb-menu") && !e.target.closest(".fi")) closeFileMenu(); });
+
+function openFileMenu(e, ev) {
+  const path = joinPath(hubView.path, e.name), w = writableHere(), m = $("fb-menu");
+  const item = (label, fn, cls) => el("button", { class: cls || "", onclick: () => { closeFileMenu(); run(null, fn); } }, label);
+  m.innerHTML = "";
+  m.append(el("div", { class: "muted small" }, e.name));
+  if (e.dir) {
+    m.append(item("Open", () => loadDir(path)));
+  } else {
+    m.append(
+      item("Open", async () => { toast(`Opening ${e.name}…`); await api("files/open", { name: hubView.name, path }); }),
+      item("Download", async () => {
+        const a = el("a", { href: `/dl/file?t=${encodeURIComponent(TOKEN)}&name=${encodeURIComponent(hubView.name)}&path=${encodeURIComponent(path)}`, download: e.name });
+        document.body.append(a); a.click(); a.remove();
+      }));
+  }
+  if (w) {
+    m.append(
+      item("Rename…", async () => {
+        const n = prompt("New name:", e.name);
+        if (!n || n === e.name) return;
+        await api("files/rename", { name: hubView.name, path, to: joinPath(hubView.path, n.trim()) });
+        await loadDir(hubView.path);
+      }),
+      item("Delete", async () => {
+        if (!confirm(`Delete ${e.name} from the hub?`)) return;
+        await api("files/delete", { name: hubView.name, path });
+        await loadDir(hubView.path);
+      }, "danger"));
+  }
+  m.style.left = Math.min(ev.clientX, innerWidth - 210) + "px";
+  m.style.top = Math.min(ev.clientY, innerHeight - 180) + "px";
+  m.classList.remove("hidden");
+}
 
 $("fp-yes").addEventListener("click", (e) =>
   run(e.target, async () => {

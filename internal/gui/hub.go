@@ -36,6 +36,8 @@ func hubState(cfg *config.Server) map[string]any {
 		"mode":             map[bool]string{true: "hub", false: "server"}[cfg.IsHub()],
 		"computers":        comps,
 		"default_computer": cfg.DefaultComputer,
+		"folders":          append([]config.SharedFolder{}, cfg.Folders...),
+		"services":         append([]config.WebService{}, cfg.Services...),
 		"ddns": map[string]any{
 			"enabled":   cfg.DDNS.Enabled,
 			"domain":    cfg.DDNS.Domain,

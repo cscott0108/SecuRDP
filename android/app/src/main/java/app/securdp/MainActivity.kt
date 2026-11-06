@@ -97,6 +97,7 @@ fun MainScreen(store: ProfileStore) {
     // Held in memory only while a first-connect fingerprint check is pending.
     var creds by remember { mutableStateOf<Creds?>(null) }
     var openWhenConnected by remember { mutableStateOf(false) }
+    var screen by remember { mutableStateOf<Screen>(Screen.Main) }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
@@ -112,6 +113,37 @@ fun MainScreen(store: ProfileStore) {
             openRemoteDesktop(context, s.profile)
         }
         if (s is TunnelState.Failed) creds = null
+        // A fresh hub login opens the hub screen; losing the connection leaves it.
+        if (s is TunnelState.Hub && screen == Screen.Main) screen = Screen.Hub
+        if (s is TunnelState.Idle || s is TunnelState.Failed) screen = Screen.Main
+    }
+
+    // Hub screens: shown instead of the list while a hub session is up.
+    val hub = hubOf(state)
+    if (hub != null && screen != Screen.Main) {
+        when (val sc = screen) {
+            Screen.Hub -> HubScreen(
+                profileName = hub.first.name, info = hub.second,
+                onRdp = { name, remember ->
+                    if (remember) profiles = store.load().map { if (it.name == hub.first.name) it.copy(computer = name) else it }
+                    openWhenConnected = true
+                    TunnelManager.choose(context, name, remember)
+                },
+                onFolder = { screen = Screen.Files(it) },
+                onWeb = { screen = Screen.Web(it) },
+                onClose = { screen = Screen.Main },
+            )
+            is Screen.Files -> FilesScreen(
+                folder = sc.folder, writableRoots = hub.second.folders.filter { it.writable }.map { it.name }.toSet(),
+                onClose = { screen = Screen.Hub },
+            )
+            is Screen.Web -> WebScreen(
+                profile = hub.first, service = sc.service, store = store,
+                onClose = { screen = Screen.Hub },
+            )
+            else -> {}
+        }
+        return
     }
 
     Scaffold(
@@ -125,7 +157,7 @@ fun MainScreen(store: ProfileStore) {
             contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { StatusCard(state, context) }
+            item { StatusCard(state, context, onOpenHub = { screen = Screen.Hub }) }
             if (profiles.isEmpty()) {
                 item {
                     Text(
@@ -137,7 +169,7 @@ fun MainScreen(store: ProfileStore) {
             }
             items(profiles, key = { it.name }) { p ->
                 val busy = state is TunnelState.Connecting || state is TunnelState.Connected ||
-                    state is TunnelState.NeedsChoice
+                    state is TunnelState.Hub
                 ProfileCard(
                     p, busy,
                     onConnect = { connectTo = p },
@@ -207,14 +239,6 @@ fun MainScreen(store: ProfileStore) {
             },
             onCancel = { creds = null; TunnelManager.clearMessage() },
         )
-        is TunnelState.NeedsChoice -> PickerDialog(
-            computers = s.computers,
-            onPick = { name, remember ->
-                if (remember) profiles = store.load().map { if (it.name == s.profile.name) it.copy(computer = name) else it }
-                TunnelManager.choose(context, name, remember)
-            },
-            onCancel = { openWhenConnected = false; TunnelManager.choose(context, null, false) },
-        )
         is TunnelState.Failed -> AlertDialog(
             onDismissRequest = { TunnelManager.clearMessage() },
             confirmButton = { TextButton(onClick = { TunnelManager.clearMessage() }) { Text("OK") } },
@@ -226,7 +250,7 @@ fun MainScreen(store: ProfileStore) {
 }
 
 @Composable
-private fun StatusCard(state: TunnelState, context: android.content.Context) {
+private fun StatusCard(state: TunnelState, context: android.content.Context, onOpenHub: () -> Unit) {
     when (state) {
         is TunnelState.Connecting -> Card(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -255,6 +279,19 @@ private fun StatusCard(state: TunnelState, context: android.content.Context) {
                 )
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { openRemoteDesktop(context, state.profile) }) { Text("Open Remote Desktop") }
+                    if (state.info != null) OutlinedButton(onClick = onOpenHub) { Text("Hub") }
+                    OutlinedButton(onClick = { TunnelManager.disconnect() }) { Text("Disconnect") }
+                }
+            }
+        }
+        is TunnelState.Hub -> Card(
+            Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Good.copy(alpha = 0.15f)),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Connected to ${state.profile.name}", fontWeight = FontWeight.SemiBold, color = Good)
+                Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onOpenHub) { Text("Open hub") }
                     OutlinedButton(onClick = { TunnelManager.disconnect() }) { Text("Disconnect") }
                 }
             }
@@ -373,36 +410,6 @@ private fun ConnectDialog(profile: Profile, onConnect: (String, String) -> Unit,
         },
         confirmButton = { TextButton(onClick = { onConnect(password, code) }, enabled = ready) { Text("Connect") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun PickerDialog(computers: List<HubComputer>, onPick: (String, Boolean) -> Unit, onCancel: () -> Unit) {
-    var keep by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("Which computer?") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                computers.forEach { c ->
-                    OutlinedButton(onClick = { onPick(c.name, keep) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("●", color = if (c.online) Good else MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.width(10.dp))
-                        Text(c.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text(
-                            (if (c.online) "online" else "not answering") + (if (c.isDefault) " · default" else ""),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = keep, onCheckedChange = { keep = it })
-                    Text("Always use this computer for this entry", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
 }
 

@@ -21,7 +21,6 @@ import (
 const version = ver.Version
 
 const (
-
 	rtIcon    = 3
 	rtGroup   = 14
 	rtVersion = 16

@@ -21,11 +21,13 @@ import kotlin.concurrent.thread
 sealed interface TunnelState {
     data object Idle : TunnelState
     data class Connecting(val profile: Profile) : TunnelState
-    /** [profile].localPort is the port actually in use (per hub PC). */
-    data class Connected(val profile: Profile, val active: Int, val computer: String? = null) : TunnelState
+    /** [profile].localPort is the port actually in use (per hub PC). [info] is set for hub logins. */
+    data class Connected(
+        val profile: Profile, val active: Int, val computer: String? = null, val info: HubInfo? = null,
+    ) : TunnelState
     data class NeedsTrust(val profile: Profile, val fingerprint: String) : TunnelState
-    /** Logged in to a hub with several PCs: the user picks one. */
-    data class NeedsChoice(val profile: Profile, val computers: List<HubComputer>) : TunnelState
+    /** Logged in to a hub (several PCs, or files / web pages): show the hub screen. */
+    data class Hub(val profile: Profile, val info: HubInfo) : TunnelState
     data class Failed(val message: String) : TunnelState
 }
 
@@ -88,9 +90,10 @@ class TunnelService : Service() {
         return START_NOT_STICKY
     }
 
-    // The profile as forwarded (localPort = the port in use) and its hub PC.
+    // The profile as forwarded (localPort = the port in use), its hub PC, and the hub's offer.
     @Volatile private var current: Profile? = null
     @Volatile private var computer: String? = null
+    @Volatile private var hubInfo: HubInfo? = null
 
     private fun label(p: Profile) = p.name + (computer?.let { " → $it" } ?: "")
 
@@ -99,6 +102,7 @@ class TunnelService : Service() {
         TunnelManager.pending = null
         current = null
         computer = null
+        hubInfo = null
         goForeground(notification("Connecting to ${profile.name}…", profile))
 
         thread(name = "securdp-connect") {
@@ -108,7 +112,7 @@ class TunnelService : Service() {
                 listener = object : Tunnel.Listener {
                     override fun onActiveChanged(active: Int) {
                         val p = current ?: profile
-                        TunnelManager.set(TunnelState.Connected(p, active, computer))
+                        TunnelManager.set(TunnelState.Connected(p, active, computer, hubInfo))
                         val what = if (active > 0) "Remote Desktop connected" else "Tunnel open - waiting for Remote Desktop"
                         updateNotification(notification("$what · ${label(p)}", p))
                     }
@@ -124,17 +128,16 @@ class TunnelService : Service() {
             try {
                 t.connect(password, code)
                 TunnelManager.tunnel = t
-                val list = t.computers()
-                if (list.size > 1) {
-                    val saved = list.firstOrNull { it.name == profile.computer }
-                    if (saved != null) {
-                        forwardTo(t, profile, saved.name)
-                    } else {
-                        TunnelManager.set(TunnelState.NeedsChoice(profile, list))
-                        updateNotification(notification("Choose a computer · ${profile.name}", profile))
+                val info = t.info()
+                val saved = info.computers.firstOrNull { it.name == profile.computer && profile.computer.isNotEmpty() }
+                when {
+                    saved != null -> forwardTo(t, profile, saved.name)
+                    info.computers.size > 1 || info.folders.isNotEmpty() || info.services.isNotEmpty() -> {
+                        hubInfo = info
+                        TunnelManager.set(TunnelState.Hub(profile, info))
+                        updateNotification(notification("Connected to the hub · ${profile.name}", profile))
                     }
-                } else {
-                    forwardTo(t, profile, null)
+                    else -> forwardTo(t, profile, null)
                 }
             } catch (e: UnknownHostException) {
                 TunnelManager.set(TunnelState.NeedsTrust(profile, e.fingerprint))
@@ -153,22 +156,26 @@ class TunnelService : Service() {
         val p = profile.copy(localPort = port)
         current = p
         computer = name
-        TunnelManager.set(TunnelState.Connected(p, 0, name))
+        TunnelManager.set(TunnelState.Connected(p, 0, name, hubInfo))
         updateNotification(notification("Tunnel open - waiting for Remote Desktop · ${label(p)}", p))
         // The visible activity opens Remote Desktop (Android blocks activity starts from services).
     }
 
     private fun choose(name: String?, remember: Boolean) {
         val t = TunnelManager.tunnel ?: return
-        val st = TunnelManager.state.value as? TunnelState.NeedsChoice ?: return
+        val profile = when (val st = TunnelManager.state.value) {
+            is TunnelState.Hub -> st.profile
+            is TunnelState.Connected -> st.profile
+            else -> return
+        }
         if (name == null) {
             t.close("Disconnected")
             return
         }
-        if (remember) ProfileStore(this).setComputer(st.profile.name, name)
+        if (remember) ProfileStore(this).setComputer(profile.name, name)
         thread(name = "securdp-choose") {
             try {
-                forwardTo(t, st.profile, name)
+                forwardTo(t, profile, name)
             } catch (e: Exception) {
                 TunnelManager.set(TunnelState.Failed(e.message ?: e.toString()))
                 t.close(e.message ?: "Failed")

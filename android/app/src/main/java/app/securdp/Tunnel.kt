@@ -37,6 +37,35 @@ class LoginFailedException :
 /** One computer from a hub's list. */
 data class HubComputer(val name: String, val online: Boolean, val isDefault: Boolean)
 
+data class HubFolder(val name: String, val writable: Boolean)
+data class HubService(val name: String, val scheme: String, val path: String)
+data class HubInfo(val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>)
+
+/** One entry of a shared folder listing. */
+data class HubFile(val name: String, val dir: Boolean, val size: Long, val mtime: Long)
+
+/** Parses "hub.securdp": c/f/s lines, tab-separated. */
+fun parseHubInfo(text: String): HubInfo {
+    val c = mutableListOf<HubComputer>()
+    val f = mutableListOf<HubFolder>()
+    val s = mutableListOf<HubService>()
+    for (line in text.lines()) {
+        val p = line.split("\t")
+        when {
+            p[0] == "c" && p.size == 4 -> c += HubComputer(p[1], p[2] == "1", p[3] == "1")
+            p[0] == "f" && p.size == 3 -> f += HubFolder(p[1], p[2] == "1")
+            p[0] == "s" && p.size == 4 -> s += HubService(p[1], p[2], p[3])
+        }
+    }
+    return HubInfo(c, f, s)
+}
+
+/** Parses a folder listing: "d|f \t size \t mtime \t name" lines. */
+fun parseListing(text: String): List<HubFile> = text.lines().mapNotNull { line ->
+    val p = line.split("\t", limit = 4)
+    if (p.size == 4) HubFile(p[3], p[0] == "d", p[1].toLongOrNull() ?: 0, p[2].toLongOrNull() ?: 0) else null
+}
+
 /** Parses the hub's list: one "name online(0/1) default(0/1)" per line. */
 fun parseComputers(text: String): List<HubComputer> =
     text.lines().mapNotNull { line ->
@@ -127,8 +156,9 @@ class Tunnel(
     }
 
     private var session: Session? = null
-    private var server: ServerSocket? = null
+    private val servers = mutableListOf<ServerSocket>()
     private val active = AtomicInteger()
+    private val holds = AtomicInteger() // files / web pages in use
     private val closed = AtomicBoolean()
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private var idleTask: ScheduledFuture<*>? = null
@@ -228,6 +258,23 @@ class Tunnel(
 
     /** Starts the loopback listener forwarding to [computer] (null = the login's). */
     fun listen(computer: String?, localPort: Int) {
+        bindLocal(localPort, computer ?: "127.0.0.1", 3389, rdp = true)
+        this.computer = computer
+        boundPort = localPort
+        scheduleIdle(startMillis)
+    }
+
+    /** Forwards [localPort] to the hub's web service [name] (granted per user on the hub). */
+    fun listenService(name: String, localPort: Int) {
+        synchronized(svcBound) {
+            if (name in svcBound) return // reopening the page reuses its listener
+            bindLocal(localPort, "svc.$name", 0, rdp = false)
+            svcBound += name
+        }
+    }
+    private val svcBound = mutableSetOf<String>()
+
+    private fun bindLocal(localPort: Int, destHost: String, destPort: Int, rdp: Boolean) {
         val s = session ?: throw IllegalStateException("not connected")
         // Built outside apply{}: inside it, `localPort` would be ServerSocket's own (-1).
         val bindAddr = InetSocketAddress(InetAddress.getByName("127.0.0.1"), localPort)
@@ -237,19 +284,156 @@ class Tunnel(
                 bind(bindAddr)
             }
         } catch (e: Exception) {
-            s.disconnect()
+            if (rdp) s.disconnect()
             throw Exception("Local port $localPort is busy: ${e.message}")
         }
-        this.computer = computer
-        boundPort = localPort
-        server = ss
-        thread(name = "securdp-accept", isDaemon = true) { acceptLoop(ss) }
-        scheduleIdle(startMillis)
+        synchronized(servers) { servers += ss }
+        thread(name = "securdp-accept", isDaemon = true) { acceptLoop(ss, destHost, destPort, rdp) }
+    }
+
+    /**
+     * Keeps the tunnel open (here and on the hub) while files or a web page
+     * are in use. Close the returned handle to let go.
+     */
+    fun hold(): AutoCloseable {
+        val s = session ?: throw IllegalStateException("not connected")
+        val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+            setHost("hold.securdp")
+            setPort(0)
+        }
+        ch.connect(5_000)
+        holds.incrementAndGet()
+        cancelIdle()
+        val released = AtomicBoolean()
+        return AutoCloseable {
+            if (released.compareAndSet(false, true)) {
+                ch.disconnect()
+                if (holds.decrementAndGet() == 0 && active.get() == 0) scheduleIdle(graceMillis)
+            }
+        }
+    }
+
+    /** Everything the hub offers this login. Falls back to [computers] on older hubs. */
+    fun info(): HubInfo {
+        val text = runCatching { readPseudo("hub.securdp") }.getOrNull()
+        val info = text?.let { parseHubInfo(it) }
+        if (info != null && (info.computers.size + info.folders.size + info.services.size) > 0) return info
+        return HubInfo(computers(), emptyList(), emptyList())
+    }
+
+    private fun readPseudo(host: String): String {
+        val s = session ?: throw IllegalStateException("not connected")
+        val pool = Executors.newSingleThreadExecutor()
+        val task = pool.submit<String> {
+            val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+                setHost(host)
+                setPort(0)
+            }
+            val input = ch.inputStream
+            ch.connect(5_000)
+            try {
+                input.readBytes().toString(Charsets.UTF_8)
+            } finally {
+                ch.disconnect()
+            }
+        }
+        return try {
+            task.get(4, TimeUnit.SECONDS)
+        } finally {
+            task.cancel(true)
+            pool.shutdownNow()
+        }
+    }
+
+    // ---- files: one request per channel (see the hub's files package) ----
+
+    /** A file response: the body stream (close it) and the status number. */
+    class FileReply(val body: InputStream, val n: Long, private val ch: ChannelDirectTCPIP) : AutoCloseable {
+        override fun close() { runCatching { ch.disconnect() } }
+    }
+
+    fun fileRequest(op: String, vararg args: String, body: InputStream? = null, bodySize: Long = 0): FileReply {
+        val s = session ?: throw IllegalStateException("not connected")
+        val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+            setHost("files.securdp")
+            setPort(0)
+        }
+        val input = ch.inputStream
+        val output = ch.outputStream
+        try {
+            ch.connect(10_000)
+        } catch (e: Exception) {
+            throw Exception("File access refused by the hub")
+        }
+        try {
+            output.write((listOf(op) + args).joinToString("\t").plus("\n").toByteArray())
+            if (body != null) {
+                val buf = ByteArray(64 * 1024)
+                var left = bodySize
+                while (left > 0) {
+                    val n = body.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                    if (n < 0) break
+                    output.write(buf, 0, n)
+                    left -= n
+                }
+            }
+            output.flush()
+            val status = readLine(input) ?: throw Exception("No reply from the hub")
+            val f = status.split("\t", limit = 2)
+            if (f[0] != "ok") throw Exception(f.getOrNull(1) ?: "Request failed")
+            return FileReply(input, f.getOrNull(1)?.toLongOrNull() ?: 0, ch)
+        } catch (e: Exception) {
+            ch.disconnect()
+            throw e
+        }
+    }
+
+    private fun simple(op: String, vararg args: String) = fileRequest(op, *args).close()
+
+    /** Lists a folder; "" lists the shared folders themselves. */
+    fun list(path: String): List<HubFile> =
+        if (path.isEmpty()) fileRequest("roots").use { r ->
+            r.body.readBytes().toString(Charsets.UTF_8).lines().mapNotNull { l ->
+                val f = l.split("\t")
+                if (f.size == 2) HubFile(f[0], true, 0, 0) else null
+            }
+        } else fileRequest("list", path).use { r -> parseListing(r.body.readBytes().toString(Charsets.UTF_8)) }
+
+    /** Streams a file; the reply's n is the file's total size. */
+    fun get(path: String, offset: Long = 0): FileReply = fileRequest("get", path, offset.toString())
+
+    fun thumb(path: String, px: Int): ByteArray = fileRequest("thumb", path, px.toString()).use { r ->
+        val b = ByteArray(r.n.toInt())
+        var off = 0
+        while (off < b.size) {
+            val n = r.body.read(b, off, b.size - off)
+            if (n < 0) throw Exception("thumbnail cut short")
+            off += n
+        }
+        b
+    }
+
+    fun put(path: String, size: Long, body: InputStream) =
+        fileRequest("put", path, size.toString(), body = body, bodySize = size).close()
+
+    fun mkdir(path: String) = simple("mkdir", path)
+    fun delete(path: String) = simple("delete", path)
+    fun rename(from: String, to: String) = simple("rename", from, to)
+
+    private fun readLine(input: InputStream): String? {
+        val out = java.io.ByteArrayOutputStream()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (out.size() == 0) null else out.toString("UTF-8")
+            if (b == '\n'.code) return out.toString("UTF-8")
+            out.write(b)
+            if (out.size() > 8192) return null
+        }
     }
 
     fun close(reason: String = "Disconnected") {
         if (!closed.compareAndSet(false, true)) return
-        runCatching { server?.close() }
+        synchronized(servers) { servers.forEach { runCatching { it.close() } } }
         runCatching { session?.disconnect() }
         timer.shutdownNow()
         listener.onClosed(reason)
@@ -278,21 +462,49 @@ class Tunnel(
         idleTask = null
     }
 
-    private fun acceptLoop(ss: ServerSocket) {
+    private fun acceptLoop(ss: ServerSocket, destHost: String, destPort: Int, rdp: Boolean) {
         while (!closed.get()) {
             val sock = try { ss.accept() } catch (_: Exception) { return }
-            thread(name = "securdp-conn", isDaemon = true) { forward(sock) }
+            thread(name = "securdp-conn", isDaemon = true) {
+                if (rdp) forward(sock, destHost, destPort) else relay(sock, destHost, destPort)
+            }
         }
     }
 
-    private fun forward(sock: Socket) {
+    /** Web service connection: forwarded, but not counted as a Remote Desktop session. */
+    private fun relay(sock: Socket, destHost: String, destPort: Int) {
+        val s = session ?: return sock.close()
+        val ch = try {
+            (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+                setHost(destHost)
+                setPort(destPort)
+            }
+        } catch (_: Exception) {
+            sock.close(); return
+        }
+        val fromServer = ch.inputStream
+        val toServer = ch.outputStream
+        try {
+            ch.connect(10_000)
+            val up = thread(isDaemon = true) { pump(sock.getInputStream(), toServer) }
+            pump(fromServer, sock.getOutputStream())
+            runCatching { sock.close() }
+            up.join(2_000)
+        } catch (_: Exception) {
+        } finally {
+            runCatching { sock.close() }
+            runCatching { ch.disconnect() }
+        }
+    }
+
+    private fun forward(sock: Socket, destHost: String, destPort: Int) {
         val s = session ?: return sock.close()
         val ch = try {
             // A computer name asks the hub for that PC; 127.0.0.1 means the
             // login's computer (what older gates expect).
             (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
-                setHost(computer ?: "127.0.0.1")
-                setPort(3389)
+                setHost(destHost)
+                setPort(destPort)
             }
         } catch (_: Exception) {
             sock.close(); return
@@ -317,7 +529,7 @@ class Tunnel(
             runCatching { ch.disconnect() }
             val n = active.decrementAndGet()
             listener.onActiveChanged(n)
-            if (n == 0) scheduleIdle(graceMillis)
+            if (n == 0 && holds.get() == 0) scheduleIdle(graceMillis)
         }
     }
 

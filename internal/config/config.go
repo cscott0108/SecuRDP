@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -82,6 +83,99 @@ type User struct {
 	// otherwise every computer on the hub.
 	Restricted bool     `json:"restricted,omitempty"`
 	Computers  []string `json:"computers,omitempty"`
+	// Files and web services are opt-in: only the names listed here.
+	Folders  []string `json:"folders,omitempty"`
+	Services []string `json:"services,omitempty"`
+}
+
+// SharedFolder is a folder on the gate PC that granted users can browse.
+type SharedFolder struct {
+	Name     string `json:"name"`               // slug, the top-level name clients see
+	Path     string `json:"path"`               // absolute local path
+	Writable bool   `json:"writable,omitempty"` // read-only unless set
+}
+
+// WebService is a web page on the home network that granted users can open
+// through the tunnel (e.g. the router's admin page).
+type WebService struct {
+	Name string `json:"name"` // slug
+	URL  string `json:"url"`  // http(s)://host[:port][/path]
+}
+
+// Target returns the service's host:port and scheme.
+func (w WebService) Target() (hostport, scheme, path string, err error) {
+	u, err := url.Parse(w.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", "", "", errors.New("URL must look like http://192.168.1.1 or https://router.lan:8443/admin")
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	p := u.EscapedPath()
+	if u.RawQuery != "" {
+		p += "?" + u.RawQuery
+	}
+	return net.JoinHostPort(u.Hostname(), port), u.Scheme, p, nil
+}
+
+func (u *User) hasName(list []string, name string) bool {
+	for _, n := range list {
+		if strings.EqualFold(n, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// CanUseFolder / CanUseService report explicit grants.
+func (u *User) CanUseFolder(name string) bool  { return u.hasName(u.Folders, name) }
+func (u *User) CanUseService(name string) bool { return u.hasName(u.Services, name) }
+
+// GrantedFolders returns the shared folders u may browse.
+func (s *Server) GrantedFolders(u *User) []SharedFolder {
+	var out []SharedFolder
+	for _, f := range s.Folders {
+		if u.CanUseFolder(f.Name) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// GrantedServices returns the web services u may open.
+func (s *Server) GrantedServices(u *User) []WebService {
+	var out []WebService
+	for _, w := range s.Services {
+		if u.CanUseService(w.Name) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// ValidateFolder checks a shared folder entry.
+func ValidateFolder(f SharedFolder) error {
+	if !computerName.MatchString(f.Name) {
+		return errors.New("name must be 1-32 lowercase letters, digits or '-'")
+	}
+	if !filepath.IsAbs(f.Path) || strings.HasPrefix(f.Path, `\\`) {
+		return errors.New(`path must be a folder on this PC, e.g. D:\Media`)
+	}
+	st, err := os.Stat(f.Path)
+	if err != nil || !st.IsDir() {
+		return errors.New("that folder doesn't exist on this PC")
+	}
+	return nil
+}
+
+// ValidateService checks a web service entry.
+func ValidateService(w WebService) error {
+	if !computerName.MatchString(w.Name) {
+		return errors.New("name must be 1-32 lowercase letters, digits or '-'")
+	}
+	_, _, _, err := w.Target()
+	return err
 }
 
 // ThisPC is the built-in computer name for the gate PC's own Remote Desktop.
@@ -115,17 +209,17 @@ type DDNSStatus struct {
 
 // Server is the gatekeeper service configuration.
 type Server struct {
-	ListenPort      int    `json:"listen_port"`
-	ListenAddress   string `json:"listen_address"` // "" = all interfaces
-	RDPTarget       string `json:"rdp_target"`     // "" = auto-detect 127.0.0.1:<RDP port>
-	MaxFailures     int    `json:"max_failures"`
-	FailureWindowS  int    `json:"failure_window_seconds"`
-	BanMinutes      int    `json:"ban_minutes"`
-	MaxSessions     int    `json:"max_sessions"`
-	IdleTimeoutMin  int    `json:"idle_timeout_minutes"` // close tunnel this long after the last RDP connection ends (0 = never)
-	BlockDirectRDP  bool   `json:"block_direct_rdp"`     // firewall rule blocking 3389 from the network
-	AllowedSources  []string `json:"allowed_sources"`    // optional CIDR allow-list; empty = any
-	Users           []User `json:"users"`
+	ListenPort     int      `json:"listen_port"`
+	ListenAddress  string   `json:"listen_address"` // "" = all interfaces
+	RDPTarget      string   `json:"rdp_target"`     // "" = auto-detect 127.0.0.1:<RDP port>
+	MaxFailures    int      `json:"max_failures"`
+	FailureWindowS int      `json:"failure_window_seconds"`
+	BanMinutes     int      `json:"ban_minutes"`
+	MaxSessions    int      `json:"max_sessions"`
+	IdleTimeoutMin int      `json:"idle_timeout_minutes"` // close tunnel this long after the last RDP connection ends (0 = never)
+	BlockDirectRDP bool     `json:"block_direct_rdp"`     // firewall rule blocking 3389 from the network
+	AllowedSources []string `json:"allowed_sources"`      // optional CIDR allow-list; empty = any
+	Users          []User   `json:"users"`
 
 	// Mode is "server" (forward to this PC only) or "hub" (forward to the
 	// Computers list). Empty means "server".
@@ -133,6 +227,10 @@ type Server struct {
 	Computers       []Computer `json:"computers,omitempty"`
 	DefaultComputer string     `json:"default_computer,omitempty"`
 	DDNS            DDNS       `json:"ddns"`
+
+	// Files and home web services (any mode); users need explicit grants.
+	Folders  []SharedFolder `json:"folders,omitempty"`
+	Services []WebService   `json:"services,omitempty"`
 }
 
 func (s *Server) IsHub() bool { return s.Mode == "hub" }

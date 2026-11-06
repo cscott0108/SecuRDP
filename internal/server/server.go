@@ -23,8 +23,8 @@ import (
 	"securdp/internal/auth"
 	"securdp/internal/config"
 	"securdp/internal/ddns"
-	"securdp/internal/version"
 	"securdp/internal/logx"
+	"securdp/internal/version"
 	"securdp/internal/winutil"
 )
 
@@ -35,7 +35,7 @@ type Server struct {
 	mu       sync.Mutex
 	cfg      *config.Server
 	cfgMod   time.Time
-	static   bool // tests: never reload from disk
+	static   bool             // tests: never reload from disk
 	lastStep map[string]int64 // TOTP replay protection per user
 	sessions atomic.Int32
 }
@@ -366,8 +366,21 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 		}
 		ssh.Unmarshal(nc.ExtraData(), &d)
 		host := strings.ToLower(d.Host)
-		if host == listHost {
+		switch {
+		case host == listHost:
 			go s.sendComputerList(nc, user, computer)
+			continue
+		case host == hubHost:
+			go s.sendHubInfo(nc, user, computer)
+			continue
+		case host == filesHost:
+			go s.serveFiles(nc, tr, user, ip)
+			continue
+		case host == holdHost:
+			go s.hold(nc, tr, user)
+			continue
+		case strings.HasPrefix(host, svcPrefix):
+			go s.forwardService(nc, tr, user, ip, strings.TrimPrefix(host, svcPrefix))
 			continue
 		}
 		target := computer
@@ -397,10 +410,24 @@ func (s *Server) sendComputerList(nc ssh.NewChannel, user, loginComputer string)
 	}
 	go ssh.DiscardRequests(reqs)
 	defer ch.Close()
+	var b strings.Builder
+	for _, c := range s.reachable(user, loginComputer) {
+		fmt.Fprintf(&b, "%s %d %d\n", c.name, b2i(c.online), b2i(c.isDefault))
+	}
+	io.WriteString(ch, b.String())
+}
+
+type reachableComputer struct {
+	name              string
+	online, isDefault bool
+}
+
+// reachable lists the computers user may reach, probing each RDP port.
+func (s *Server) reachable(user, loginComputer string) []reachableComputer {
 	cfg := s.config()
 	u := cfg.FindUser(user)
 	if u == nil {
-		return
+		return nil
 	}
 	var comps []config.Computer
 	for _, c := range cfg.ActiveComputers() {
@@ -423,11 +450,11 @@ func (s *Server) sendComputerList(nc ssh.NewChannel, user, loginComputer string)
 		}()
 	}
 	wg.Wait()
-	var b strings.Builder
+	out := make([]reachableComputer, len(comps))
 	for i, c := range comps {
-		fmt.Fprintf(&b, "%s %d %d\n", c.Name, b2i(online[i]), b2i(c.Name == loginComputer))
+		out[i] = reachableComputer{c.Name, online[i], c.Name == loginComputer}
 	}
-	io.WriteString(ch, b.String())
+	return out
 }
 
 func b2i(b bool) int {

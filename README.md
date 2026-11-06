@@ -110,6 +110,26 @@ client ──SSH──► router :port ──► hub (SecuRDP) ──► desktop
 - **Wake-on-LAN:** if a PC with a MAC address doesn't answer at login, the hub sends a wake-up packet. Reconnect after it boots.
 - **Server mode** behaves exactly as before, with only this PC reachable. Switching modes needs no service restart.
 
+### Files & home web pages (1.5+)
+
+On the server/hub, the **Files & Web** tab sets up two things:
+- **Shared folders.** Pick a name and a folder on the hub PC. Folders are read-only unless you tick *Allow uploads, new folders, rename and delete*.
+- **Home web pages.** A name and an address, e.g. `router` → `http://192.168.1.254` or `plex` → `http://127.0.0.1:32400/web`. **Test** checks it answers.
+
+Nothing is visible to anyone until you tick it for them on the **Users** tab.
+
+In the apps, after logging in to the hub, the hub screen shows **Remote Desktop**, **Files** and **Web pages**:
+- **File browser:** *Large icons* (thumbnails for photos and videos, made on the hub by Windows' own thumbnail engine), *List* or *Details* (sortable name / date / type / size).
+  - **Windows:** click to open a folder; click a file for Open / Download (right-click also offers Rename / Delete in writable folders). Upload and New folder appear in writable folders.
+  - **Android:** tap a file for Open / Save to phone / Share, plus Rename / Delete in writable folders.
+- **Web pages** open in a SecuRDP browser window (Windows) or in the app (Android), through the tunnel. Self-signed certificates (typical for routers) ask once before continuing.
+
+Security:
+- Paths can never leave a shared folder. `..`, junctions or symlinks pointing outside, Windows device names and alternate data streams are all refused.
+- Deletes are limited to files and empty folders, and uploads never overwrite.
+- Every file action is written to the activity log (`FILE user=… get "media/…"`).
+- Users without a grant get nothing, even if their app asks directly.
+
 ### Dynamic DNS (DuckDNS)
 
 *This PC → 5. Dynamic DNS*: sign in at duckdns.org, add a name, then paste the name and token. The service checks your public IP every 5 minutes and updates DuckDNS when it changes, plus a daily refresh. Clients then use `name.duckdns.org:port`. The token is stored encrypted, and DDNS events appear in the activity log.

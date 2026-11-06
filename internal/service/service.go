@@ -267,7 +267,7 @@ func installTrayTask(exe string) {
 		sysRoot = `C:\Windows`
 	}
 	conhost := filepath.Join(sysRoot, "System32", "conhost.exe")
-	xml :=`<?xml version="1.0" encoding="UTF-16"?>
+	xml := `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Shows the SecuRDP icon in the notification area.</Description></RegistrationInfo>
   <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>

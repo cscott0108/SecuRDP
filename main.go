@@ -64,6 +64,19 @@ func main() {
 			tray.StartIfNeeded()
 		}
 		err = gui.Run(opt)
+	case "web":
+		// Opened by the hub screen: securdp web --title T --url http://127.0.0.x:port/...
+		var title, u string
+		for i := 1; i+1 < len(args); i += 2 {
+			switch args[i] {
+			case "--title":
+				title = args[i+1]
+			case "--url":
+				u = args[i+1]
+			}
+		}
+		winutil.HideOwnConsole()
+		err = gui.RunWeb(title, u)
 	case "tray":
 		winutil.HideOwnConsole()
 		err = tray.Run()
