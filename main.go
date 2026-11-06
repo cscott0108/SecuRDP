@@ -46,6 +46,7 @@ func main() {
 	var err error
 	switch cmd {
 	case "gui":
+		gui.AfterUpdate(args[1:]) // a restart after an update: let the old copy exit first
 		opt := gui.Options{}
 		for _, a := range args[1:] {
 			opt.Browser = opt.Browser || a == "--browser"

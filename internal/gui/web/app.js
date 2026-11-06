@@ -115,6 +115,7 @@ function render() {
   document.querySelectorAll(".gate-port").forEach((e) => (e.textContent = (s.settings && s.settings.listen_port) || "?"));
   renderPublicIP(s);
   renderVersions(s);
+  renderUpdate(s);
 
   renderHub(s);
   renderSharing(s);
@@ -139,6 +140,36 @@ function cmpVer(a, b) {
   }
   return 0;
 }
+// A newer SecuRDP on a hub you logged in to: offer to update from it.
+let updateSig = "";
+function renderUpdate(s) {
+  const u = s.update;
+  const sig = JSON.stringify(u || null);
+  if (sig === updateSig) return;
+  updateSig = sig;
+  for (const box of document.querySelectorAll(".update-banner")) {
+    box.innerHTML = "";
+    box.classList.toggle("hidden", !u);
+    if (!u) continue;
+    const where = u.installed_copy
+      ? "This is the installed copy, so the new version is saved to your Downloads folder and opened from there; use Install / update in it to update the service too."
+      : "SecuRDP restarts in the new version.";
+    const btn = el("button", { class: "primary", onclick: (e) => run(e.target, async () => {
+      if (!confirm(`Update to SecuRDP ${u.version} from ${u.hub} and restart? Open connections will close.`)) return;
+      e.target.textContent = "Downloading…";
+      const r = await api("update", { name: u.hub });
+      toast(`Updated to ${r.version} - restarting…`, "ok");
+    }) }, "Update & restart");
+    btn.disabled = !u.connected;
+    box.append(
+      el("div", {}, el("b", {}, `SecuRDP ${u.version} is available from ${u.hub}.`), " ",
+        el("span", { class: "muted small" }, u.connected
+          ? `Updating closes your open connections. ${where}`
+          : `Connect to ${u.hub} to update from it.`)),
+      btn);
+  }
+}
+
 function renderVersions(s) {
   $("app-version").textContent = "v" + s.version;
   $("ver-app").textContent = s.version + (s.running_installed ? " (the installed copy)" : "");

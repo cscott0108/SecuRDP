@@ -46,6 +46,7 @@ type app struct {
 	pending  map[string]pendingUser
 	tunnels  map[string]*client.Tunnel // by profile name
 	sessions map[string]*session       // hub sessions (hub screen / files / web)
+	updates  map[string]string         // profile -> newer version its hub offers (update.go)
 	thumbs   thumbCache
 	quit     chan struct{}
 	pubIP    publicIP
@@ -69,7 +70,7 @@ type Options struct{ Browser, NoOpen bool }
 // Run starts the UI and blocks until the window is closed.
 func Run(opt Options) error {
 	a := &app{token: randHex(32), pending: map[string]pendingUser{}, tunnels: map[string]*client.Tunnel{},
-		sessions: map[string]*session{}, quit: make(chan struct{})}
+		sessions: map[string]*session{}, updates: map[string]string{}, quit: make(chan struct{})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -248,6 +249,7 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/users/access", true, setUserAccess)
 	a.api(mux, "/api/users/grants", true, setUserGrants)
 	a.api(mux, "/api/users/applinks", true, setAppLinks)
+	a.api(mux, "/api/update", false, a.applyUpdate)
 	a.api(mux, "/api/users/unpair", true, unpairDevice)
 	a.api(mux, "/api/folders/save", true, saveFolder)
 	a.api(mux, "/api/folders/delete", true, deleteFolder)
@@ -356,7 +358,9 @@ func (a *app) state(*http.Request) (any, error) {
 			external[n] = s.externalPages()
 		}
 	}
+	update := a.updateOffer()
 	a.mu.Unlock()
+	st["update"] = update
 	st["connected"] = conn
 	st["hubs"] = hubs
 	st["external"] = external
@@ -643,6 +647,7 @@ func (a *app) connect(r *http.Request) (any, error) {
 	if info == nil {
 		info = &client.HubInfo{}
 	}
+	a.noteHubVersion(in.Name, info)
 	for _, c := range info.Computers {
 		if c.Name == p.Computer && p.Computer != "" {
 			return a.startForward(in.Name, t, c.Name, false, true)

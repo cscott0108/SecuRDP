@@ -2,6 +2,8 @@ package client
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ type HubInfo struct {
 	Computers []HubComputer `json:"computers"`
 	Folders   []HubFolder   `json:"folders"`
 	Services  []HubService  `json:"services"`
+	Version   string        `json:"version,omitempty"` // the hub's SecuRDP version (1.8+ hubs)
 }
 
 // readAll opens a pseudo destination and reads its whole reply, giving up
@@ -65,6 +68,8 @@ func (t *Tunnel) Info() (*HubInfo, error) {
 		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 			f := strings.Split(line, "\t")
 			switch {
+			case f[0] == "V" && len(f) == 2:
+				info.Version = f[1]
 			case f[0] == "c" && len(f) == 4:
 				info.Computers = append(info.Computers, HubComputer{f[1], f[2] == "1", f[3] == "1"})
 			case f[0] == "f" && len(f) == 3:
@@ -86,6 +91,41 @@ func (t *Tunnel) Info() (*HubInfo, error) {
 	list, err := t.Computers()
 	info.Computers = list
 	return info, err
+}
+
+// DownloadUpdate fetches the hub's own securdp.exe into w, checking its
+// size and SHA-256 as it goes. It returns the version the hub says it is.
+// Only call it when Info reported a Version (older hubs don't serve it).
+func (t *Tunnel) DownloadUpdate(w io.Writer) (string, error) {
+	ch, err := t.ssh.Dial("tcp", "update.securdp:0")
+	if err != nil {
+		return "", fmt.Errorf("the hub refused the update: %w", err)
+	}
+	defer ch.Close()
+	br := bufio.NewReader(ch)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		return "", errors.New("no reply from the hub")
+	}
+	f := strings.Split(strings.TrimRight(line, "\r\n"), "\t")
+	if f[0] != "ok" || len(f) != 4 {
+		if f[0] == "err" && len(f) == 2 {
+			return "", errors.New(f[1])
+		}
+		return "", errors.New("unexpected reply from the hub")
+	}
+	size, err := strconv.ParseInt(f[1], 10, 64)
+	if err != nil || size <= 0 || size > 256<<20 {
+		return "", errors.New("unexpected update size")
+	}
+	h := sha256.New()
+	if n, err := io.CopyN(io.MultiWriter(w, h), br, size); err != nil {
+		return "", fmt.Errorf("download stopped after %d of %d bytes", n, size)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != f[2] {
+		return "", errors.New("the download was damaged (checksum mismatch)")
+	}
+	return f[3], nil
 }
 
 // Hold keeps the tunnel open on the hub while files or web pages are in use

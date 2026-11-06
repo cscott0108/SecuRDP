@@ -110,6 +110,11 @@ func TestServeForExternalClient(t *testing.T) {
 		cfg.Users[i].Services = []string{"status"}
 	}
 
+	// The exe offered as an update (default: this test binary).
+	if exe := os.Getenv("SECURDP_SERVE_EXE"); exe != "" {
+		exePath = func() (string, error) { return exe, nil }
+	}
+
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(priv)
 	log, _ := logx.Open(os.DevNull, os.Stdout)

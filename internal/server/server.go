@@ -387,6 +387,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 		case host == filesHost:
 			go s.serveFiles(nc, tr, user, ip)
 			continue
+		case host == updateHost:
+			go s.serveUpdate(nc, user, ip)
+			continue
 		case host == pairHost:
 			go s.pair(nc, user, ip)
 			continue

@@ -82,6 +82,14 @@ Tips:
 
 The first time, Remote Desktop may warn that the certificate name doesn't match, because it sees `127.0.0.x`. That's expected through a tunnel. Tick *Don't ask me again* for that computer.
 
+### Updating from the hub (1.8+)
+
+Update the hub once (*Install / update* with the new exe). When a 1.8+ app logs in to a hub running a newer version, a banner offers **Update & restart**:
+- The app downloads the hub's own `securdp.exe` through the tunnel. Behind it are the pinned host key and your password + code. The download's size and SHA-256 are checked, and the app test-runs the new file to confirm its version.
+- The running exe is renamed to `securdp.exe.old`, and the new one takes its place and restarts. The old file is deleted on the next start, and open connections close.
+- If you're running the **installed copy** (Program Files), or its folder isn't writable, the new version is saved to *Downloads* and opened from there instead. Use **Install / update** in it to update the service on that PC too.
+- Older apps don't see the offer. Copy the new exe over once, and from then on updates come from the hub. The hub's log records each download (`UPDATE … downloaded SecuRDP x.y.z`).
+
 ### Command line
 
 ```

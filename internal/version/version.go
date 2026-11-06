@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const Version = "1.7.0"
+const Version = "1.8.0"
 
 // Compare returns -1, 0 or 1 comparing dotted versions a and b ("1.4.0").
 func Compare(a, b string) int {

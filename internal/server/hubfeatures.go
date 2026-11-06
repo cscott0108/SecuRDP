@@ -11,6 +11,7 @@ import (
 
 	"securdp/internal/files"
 	"securdp/internal/thumb"
+	"securdp/internal/version"
 )
 
 // Pseudo destinations a client can open besides Remote Desktop. Each is
@@ -22,6 +23,7 @@ const (
 	//   s \t name \t scheme \t path         (web services)
 	//   S \t name \t host:port              (a web service's own address, 1.6+)
 	//   A \t 1                              (the user may pair app links, 1.7+)
+	//   V \t version                        (the hub's SecuRDP version, 1.8+; see update.go)
 	hubHost   = "hub.securdp"
 	filesHost = "files.securdp" // one file request per channel (see package files)
 	holdHost  = "hold.securdp"  // held open by a client browsing files or web pages
@@ -44,6 +46,7 @@ func (s *Server) sendHubInfo(nc ssh.NewChannel, user, loginComputer string) {
 	}
 	defer ch.Close()
 	var b strings.Builder
+	fmt.Fprintf(&b, "V\t%s\n", version.Version)
 	for _, c := range s.reachable(user, loginComputer) {
 		fmt.Fprintf(&b, "c\t%s\t%d\t%d\n", c.name, b2i(c.online), b2i(c.isDefault))
 	}
