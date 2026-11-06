@@ -11,6 +11,7 @@ import android.provider.OpenableColumns
 import android.util.LruCache
 import android.webkit.MimeTypeMap
 import android.webkit.SslErrorHandler
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -42,6 +43,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -63,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -299,7 +302,14 @@ fun FilesScreen(folder: String, writableRoots: Set<String>, onClose: () -> Unit)
             navigationIcon = {
                 TextButton(onClick = { if (path.contains('/')) path = path.substringBeforeLast('/') else onClose() }) { Text("‹ Back") }
             },
+            actions = {
+                TextButton(onClick = { reload++ }) { Text("↻") }
+                if (writable) TextButton(onClick = { newFolder = true }) { Text("New folder") }
+            },
         )
+    }, floatingActionButton = {
+        // A big, always-visible button: the toolbar row is too narrow on phones.
+        if (writable) ExtendedFloatingActionButton(onClick = { uploadLauncher.launch(arrayOf("*/*")) }) { Text("⬆  Upload") }
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -310,19 +320,14 @@ fun FilesScreen(folder: String, writableRoots: Set<String>, onClose: () -> Unit)
                     if (sort == it) asc = !asc else { sort = it; asc = true }
                     prefs.edit().putString("sort", sort).apply()
                 }
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = { reload++ }) { Text("↻") }
-                if (writable) {
-                    TextButton(onClick = { newFolder = true }) { Text("+📁") }
-                    TextButton(onClick = { uploadLauncher.launch(arrayOf("*/*")) }) { Text("Upload") }
-                }
             }
             if (loading || busy != null) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
                 busy?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp)) }
             }
             Text(
-                "${shown.size} items" + if (writable) "" else " · read-only",
+                if (writable) "${shown.size} items"
+                else "${shown.size} items · read-only. To allow uploads, on the hub open Files & Web → Edit this folder → tick \"Allow uploads…\".",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp),
@@ -330,7 +335,7 @@ fun FilesScreen(folder: String, writableRoots: Set<String>, onClose: () -> Unit)
             when (view) {
                 "icons" -> LazyVerticalGrid(
                     GridCells.Adaptive(108.dp), Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(8.dp),
+                    contentPadding = PaddingValues(8.dp, 8.dp, 8.dp, 96.dp),
                 ) {
                     items(shown, key = { it.name }) { f ->
                         Column(
@@ -342,7 +347,7 @@ fun FilesScreen(folder: String, writableRoots: Set<String>, onClose: () -> Unit)
                         }
                     }
                 }
-                "list" -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
+                "list" -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp, 8.dp, 8.dp, 96.dp)) {
                     items(shown, key = { it.name }) { f ->
                         Row(Modifier.fillMaxWidth().clickable { open(f) }.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Thumb("$path/${f.name}", f, 36, 96)
@@ -351,7 +356,7 @@ fun FilesScreen(folder: String, writableRoots: Set<String>, onClose: () -> Unit)
                         }
                     }
                 }
-                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
+                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp, 8.dp, 8.dp, 96.dp)) {
                     item {
                         Row(Modifier.fillMaxWidth().padding(8.dp)) {
                             Header("Name", "name", sort, asc, Modifier.weight(1f)) { if (sort == it) asc = !asc else { sort = it; asc = true } }
@@ -533,6 +538,7 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
     var sslAsk by remember { mutableStateOf<SslErrorHandler?>(null) }
     var trusted by remember { mutableStateOf(false) }
     var web by remember { mutableStateOf<WebView?>(null) }
+    var progress by remember { mutableStateOf(0) } // 0-100 for the page being loaded
 
     // Forward a stable local port to the service and hold the tunnel open.
     DisposableEffect(service.name) {
@@ -554,11 +560,19 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
         TopAppBar(
             title = { Text(service.name, fontWeight = FontWeight.SemiBold) },
             navigationIcon = { TextButton(onClick = onClose) { Text("‹ Back") } },
-            actions = { TextButton(onClick = { web?.reload() }) { Text("↻") } },
+            actions = {
+                if (progress < 100 && ready != null) TextButton(onClick = { web?.stopLoading(); progress = 100 }) { Text("✕") }
+                else TextButton(onClick = { web?.reload() }) { Text("↻") }
+            },
         )
     }) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
             val url = ready
+            // Loading bar across the top (home devices like routers can be slow).
+            if (url != null && error == null && progress < 100) {
+                if (progress <= 5) LinearProgressIndicator(Modifier.fillMaxWidth().zIndex(1f))
+                else LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth().zIndex(1f))
+            }
             when {
                 error != null -> Text(error!!, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
                 url == null -> LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -570,7 +584,13 @@ fun WebScreen(profile: Profile, service: HubService, store: ProfileStore, onClos
                         settings.useWideViewPort = true
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView, newProgress: Int) { progress = newProgress }
+                        }
                         webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) { progress = 0 }
+                            override fun onPageFinished(view: WebView, url: String?) { progress = 100 }
+
                             // Home devices often use self-signed certificates: ask once per page visit.
                             @SuppressLint("WebViewClientOnReceivedSslError")
                             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, err: SslError) {
