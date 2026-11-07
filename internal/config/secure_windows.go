@@ -63,6 +63,19 @@ func ProtectSecret(plain string) (string, error) {
 	return base64.StdEncoding.EncodeToString(unsafe.Slice(out.Data, out.Size)), nil
 }
 
+// ProtectUserSecret encrypts with DPAPI bound to the current Windows user
+// (client-side secrets such as a trusted home key). UnprotectSecret reads both.
+func ProtectUserSecret(plain string) (string, error) {
+	in := windows.DataBlob{Size: uint32(len(plain)), Data: unsafe.SliceData([]byte(plain))}
+	var out windows.DataBlob
+	err := windows.CryptProtectData(&in, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &out)
+	if err != nil {
+		return "", err
+	}
+	defer windows.LocalFree(windows.Handle(unsafe.Pointer(out.Data)))
+	return base64.StdEncoding.EncodeToString(unsafe.Slice(out.Data, out.Size)), nil
+}
+
 func UnprotectSecret(enc string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {

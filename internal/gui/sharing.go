@@ -201,9 +201,13 @@ func renameDeviceService(cfg *config.Server, from, to string) {
 	}
 }
 
-// setAppLinks turns device pairing on or off for a user. Turning it off
-// also unpairs the user's devices, so turning it back on starts clean.
-func setAppLinks(r *http.Request) (any, error) {
+// setAppLinks / setHomeLogin turn a kind of paired device on or off for a
+// user. Turning one off also unpairs that kind, so turning it back on
+// starts clean.
+func setAppLinks(r *http.Request) (any, error)  { return setDeviceKind(r, false) }
+func setHomeLogin(r *http.Request) (any, error) { return setDeviceKind(r, true) }
+
+func setDeviceKind(r *http.Request, home bool) (any, error) {
 	in, err := decode[struct {
 		Username string `json:"username"`
 		Enabled  bool   `json:"enabled"`
@@ -216,9 +220,13 @@ func setAppLinks(r *http.Request) (any, error) {
 		if u == nil {
 			return errors.New("no such user")
 		}
-		u.AppLinks = in.Enabled
+		if home {
+			u.HomeLogin = in.Enabled
+		} else {
+			u.AppLinks = in.Enabled
+		}
 		if !in.Enabled {
-			u.Devices = nil
+			u.RemoveDeviceKind(home)
 		}
 		return nil
 	})
@@ -228,13 +236,14 @@ func unpairDevice(r *http.Request) (any, error) {
 	in, err := decode[struct {
 		Username string `json:"username"`
 		Device   string `json:"device"`
+		Home     bool   `json:"home"`
 	}](r)
 	if err != nil {
 		return nil, err
 	}
 	return nil, withConfig(func(cfg *config.Server) error {
 		u := cfg.FindUser(in.Username)
-		if u == nil || !u.RemoveDevice(in.Device) {
+		if u == nil || !u.RemoveDevice(in.Device, in.Home) {
 			return errors.New("no such device")
 		}
 		return nil

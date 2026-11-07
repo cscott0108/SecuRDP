@@ -168,6 +168,29 @@ How it works and what it can't do:
 - **To revoke:** tap **Remove** on the phone (also removed on the hub if you're connected), or tap **Remove** next to the device on the hub's *Users* tab. Removing the page, ungranting it, or turning App links off for the user also stops the link. Unknown keys are logged but don't count towards IP bans.
 - Every app on the phone can reach a loopback port, so the page should check its own token. The link controls who reaches the hub, not which app on the phone uses it.
 
+### Local login at home (1.10+)
+
+The **Local** button connects **without password or code**, but only from your home network.
+
+1. **On the hub:** on the *Users* tab, tick **Trusted home devices** for the user.
+2. **On each PC or phone**, connect normally (password + code), then on the hub screen tap **Trust this PC / phone at home**.
+   - Give the device a name, plus the hub's **home address** (e.g. `192.168.1.65`).
+   - Local then connects straight to the hub on your network instead of through your router.
+3. When you're home, tap **Local** on that saved computer. Away from home, use **Connect** with password + code as usual.
+
+How it's protected:
+- The device gets a key: in the Android Keystore (can't be exported), or DPAPI-protected for your Windows account on a PC. Only the public key goes to the hub.
+- The hub accepts that key only when **both** of these hold:
+  - it's one of your trusted devices, and
+  - the connection comes from one of the hub's own home-network subnets.
+- So a guest on your Wi-Fi gets nothing without a trusted device. A router that makes internet traffic look local still can't get in without the key.
+- Adding or removing devices always needs a password + code login. A Local login can't trust more devices.
+- **Revoking access:**
+  - *Stop trusting* on the device removes it on the hub too.
+  - **Remove** next to the device on the hub's *Users* tab works as well.
+  - Unticking **Trusted home devices** removes all of that user's home devices.
+- Each Local login is logged (`LOGIN … home device="…" (no password, home network)`), and attempts from outside the home network are logged as refused.
+
 ### Dynamic DNS (DuckDNS)
 
 *This PC → 5. Dynamic DNS*: sign in at duckdns.org, add a name, then paste the name and token. The service checks your public IP every 5 minutes and updates DuckDNS when it changes, plus a daily refresh. Clients then use `name.duckdns.org:port`. The token is stored encrypted, and DDNS events appear in the activity log.

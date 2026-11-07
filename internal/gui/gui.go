@@ -103,11 +103,12 @@ func Run(opt Options) error {
 		<-a.quit
 		return nil
 	}
+	width, height := windowSize(1100, 820)
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		AutoFocus: true,
 		DataPath:  filepath.Join(config.ClientDir(), "webview"),
 		WindowOptions: webview2.WindowOptions{
-			Title: title, Width: 1040, Height: 780, Center: true, IconId: 1, // RT_GROUP_ICON #1 from tools/mkres
+			Title: title, Width: width, Height: height, Center: true, IconId: 1, // RT_GROUP_ICON #1 from tools/mkres
 		},
 	})
 	if w == nil {
@@ -249,6 +250,7 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/users/access", true, setUserAccess)
 	a.api(mux, "/api/users/grants", true, setUserGrants)
 	a.api(mux, "/api/users/applinks", true, setAppLinks)
+	a.api(mux, "/api/users/homelogin", true, setHomeLogin)
 	a.api(mux, "/api/update", false, a.applyUpdate)
 	a.api(mux, "/api/users/unpair", true, unpairDevice)
 	a.api(mux, "/api/folders/save", true, saveFolder)
@@ -264,6 +266,7 @@ func (a *app) routes() http.Handler {
 	a.api(mux, "/api/profiles/delete", false, a.deleteProfile)
 	a.api(mux, "/api/connect", false, a.connect)
 	a.sessionRoutes(mux)
+	a.homeRoutes(mux)
 	a.api(mux, "/api/disconnect", false, a.disconnect)
 
 	return a.guard(mux)
@@ -277,12 +280,14 @@ type userView struct {
 	Folders    []string     `json:"folders"`
 	Services   []string     `json:"services"`
 	AppLinks   bool         `json:"app_links"`
+	HomeLogin  bool         `json:"home_login"`
 	Devices    []deviceView `json:"devices"`
 }
 
 type deviceView struct {
 	Name    string `json:"name"`
 	Service string `json:"service"`
+	Home    bool   `json:"home"`
 	Added   int64  `json:"added"`
 }
 
@@ -310,10 +315,10 @@ func (a *app) state(*http.Request) (any, error) {
 			for _, u := range cfg.Users {
 				devices := []deviceView{}
 				for _, d := range u.Devices {
-					devices = append(devices, deviceView{d.Name, d.Service, d.Added})
+					devices = append(devices, deviceView{d.Name, d.Service, d.Home, d.Added})
 				}
 				users = append(users, userView{u.Username, u.Enabled, u.Restricted, append([]string{}, u.Computers...),
-					append([]string{}, u.Folders...), append([]string{}, u.Services...), u.AppLinks, devices})
+					append([]string{}, u.Folders...), append([]string{}, u.Services...), u.AppLinks, u.HomeLogin, devices})
 			}
 			st["hub"] = hubState(cfg)
 			st["settings"] = map[string]any{
@@ -336,7 +341,12 @@ func (a *app) state(*http.Request) (any, error) {
 	if cc.Profiles == nil {
 		cc.Profiles = []config.Profile{}
 	}
-	st["profiles"] = cc.Profiles
+	// The (DPAPI-protected) home key stays out of the page.
+	profiles := append([]config.Profile{}, cc.Profiles...)
+	for i := range profiles {
+		profiles[i].HomeKey = ""
+	}
+	st["profiles"] = profiles
 	a.mu.Lock()
 	conn := map[string]string{}
 	for n, t := range a.tunnels {
@@ -568,6 +578,7 @@ func (a *app) saveProfile(r *http.Request) (any, error) {
 			p.HostFingerprint = ex.HostFingerprint
 		}
 		p.LocalIP, p.ComputerIPs = ex.LocalIP, ex.ComputerIPs
+		p.HomeKey, p.HomeDevice = ex.HomeKey, ex.HomeDevice // never sent to the page
 		cc.AssignLocalIP(&p)
 		*ex = p
 	} else {
@@ -575,6 +586,7 @@ func (a *app) saveProfile(r *http.Request) (any, error) {
 			return nil, errors.New("a profile with that name already exists")
 		}
 		p.HostFingerprint, p.LocalIP, p.ComputerIPs = "", "", nil
+		p.HomeKey, p.HomeDevice = "", ""
 		cc.AssignLocalIP(&p)
 		cc.Profiles = append(cc.Profiles, p)
 	}
@@ -604,6 +616,7 @@ func (a *app) connect(r *http.Request) (any, error) {
 	in, err := decode[struct {
 		Name, Password, Code string
 		TrustFingerprint     string `json:"trust_fingerprint"`
+		Home                 bool   `json:"home"` // the Local button: this PC's trusted home login
 	}](r)
 	if err != nil {
 		return nil, err
@@ -633,7 +646,16 @@ func (a *app) connect(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	t, err := client.Connect(*p, in.Password, in.Code)
+	var t *client.Tunnel
+	if in.Home {
+		key, kerr := homeSigner(p)
+		if kerr != nil {
+			return nil, kerr
+		}
+		t, err = client.ConnectHome(*p, key)
+	} else {
+		t, err = client.Connect(*p, in.Password, in.Code)
+	}
 	var uh *client.UnknownHostError
 	if errors.As(err, &uh) {
 		return map[string]string{"status": "verify_host", "fingerprint": uh.Fingerprint}, nil

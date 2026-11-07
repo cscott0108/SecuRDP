@@ -38,12 +38,13 @@ func RunWeb(title, rawURL string) error {
 // go-webview2 ties the browser's right-click menu (Copy, Paste, Save image…)
 // to, so it's on; it also enables F12 / Inspect for troubleshooting pages.
 func newWebWindow(title, dataPath string) webview2.WebView {
+	width, height := windowSize(1280, 860)
 	return webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     true,
 		AutoFocus: true,
 		DataPath:  dataPath,
 		WindowOptions: webview2.WindowOptions{
-			Title: "SecuRDP - " + title, Width: 1280, Height: 860, Center: true, IconId: 1,
+			Title: "SecuRDP - " + title, Width: width, Height: height, Center: true, IconId: 1,
 		},
 	})
 }

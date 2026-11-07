@@ -47,6 +47,8 @@ data class HubService(val name: String, val scheme: String, val path: String, va
 data class HubInfo(
     val computers: List<HubComputer>, val folders: List<HubFolder>, val services: List<HubService>,
     val appLinks: Boolean = false, val apkCode: Int = 0, val apkName: String = "",
+    /** This login may trust devices for home login (1.10+ hubs). */
+    val homeLogin: Boolean = false,
 )
 
 /** One entry of a shared folder listing. */
@@ -60,6 +62,7 @@ fun parseHubInfo(text: String): HubInfo {
     var links = false
     var apkCode = 0
     var apkName = ""
+    var home = false
     for (line in text.lines()) {
         val p = line.split("\t")
         when {
@@ -69,9 +72,10 @@ fun parseHubInfo(text: String): HubInfo {
             p[0] == "S" && p.size == 3 -> s.replaceAll { if (it.name == p[1]) it.copy(target = p[2]) else it }
             p[0] == "A" && p.size == 2 -> links = p[1] == "1"
             p[0] == "P" && p.size == 3 -> { apkCode = p[1].toIntOrNull() ?: 0; apkName = p[2] }
+            p[0] == "L" && p.size == 2 -> home = p[1] == "1"
         }
     }
-    return HubInfo(c, f, s, links, apkCode, apkName)
+    return HubInfo(c, f, s, links, apkCode, apkName, home)
 }
 
 /** Parses a folder listing: "d|f \t size \t mtime \t name" lines. */
@@ -220,11 +224,28 @@ class Tunnel(
     }
 
     /** Connects and authenticates only (then [computers] / [listen]). Blocking. */
-    fun connect(password: String, code: String) {
-        val keys = PinnedHostKey(pinnedFingerprint)
-        val s = gateSession(host, port, username, keys)
+    fun connect(password: String, code: String) = login(null) { s ->
         s.setConfig("PreferredAuthentications", "keyboard-interactive")
         s.userInfo = Answers(password, code)
+    }
+
+    /**
+     * Logs in with this phone's trusted home key: no password or code. The hub
+     * only accepts it from the home network. Blocking.
+     */
+    fun connectHome(identity: com.jcraft.jsch.Identity) = try {
+        login(JSch().apply { addIdentity(identity, null) }) { s -> s.setConfig("PreferredAuthentications", "publickey") }
+    } catch (_: LoginFailedException) {
+        throw Exception(
+            "The hub didn't accept this phone's home login. It only works on your home network - " +
+                "away from home, use Connect with your password and code. (Or it was removed on the hub.)",
+        )
+    }
+
+    private fun login(jsch: JSch?, auth: (Session) -> Unit) {
+        val keys = PinnedHostKey(pinnedFingerprint)
+        val s = if (jsch != null) gateSession(host, port, username, keys, jsch) else gateSession(host, port, username, keys)
+        auth(s)
         s.setServerAliveInterval(30_000)
         s.setServerAliveCountMax(3)
         try {
@@ -357,6 +378,12 @@ class Tunnel(
 
     /** Removes a paired device from the hub. */
     fun unpair(device: String) = linkRequest("unpair\t$device")
+
+    /** Trusts this phone's key for home login (no password on the home network); needs this password + code login. */
+    fun trust(device: String, publicKey: String) = linkRequest("trust\t$device\t$publicKey")
+
+    /** Removes this phone's home login from the hub. */
+    fun untrust(device: String) = linkRequest("untrust\t$device")
 
     /**
      * Downloads the Android app the hub offers into [out], checking its size

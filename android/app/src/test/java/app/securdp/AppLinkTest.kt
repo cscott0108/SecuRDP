@@ -84,6 +84,56 @@ class AppLinkTest {
     }
 
     @Test
+    fun homeAddressParsing() {
+        val p = Profile("home", "myhome.duckdns.org", 47213, "me")
+        assertEquals("myhome.duckdns.org" to 47213, homeAddress(p))
+        assertEquals("192.168.1.65" to 47213, homeAddress(p.copy(homeHost = "192.168.1.65")))
+        assertEquals("192.168.1.65" to 2222, homeAddress(p.copy(homeHost = "192.168.1.65:2222")))
+        assertTrue(parseHubInfo("L\t1\n").homeLogin)
+    }
+
+    /** Trust over a password + code login, then log in with the key alone, then untrust (probe.five). */
+    @Test
+    fun homeLoginAgainstTestGate() {
+        val e2ePort: Int = System.getProperty("securdp.e2e.port")?.toInt()
+            ?: run { assumeTrue("set -Dsecurdp.e2e.port", false); return }
+        val noop = object : Tunnel.Listener {
+            override fun onActiveChanged(active: Int) {}
+            override fun onClosed(reason: String) {}
+        }
+        val pinned = try {
+            Tunnel("127.0.0.1", e2ePort, "probe.five", "", 0, noop).connect("x", "000000")
+            error("expected UnknownHostException")
+        } catch (e: UnknownHostException) {
+            e.fingerprint
+        }
+        val kp = newKey()
+        val id = softwareIdentity(kp.public as ECPublicKey, kp.private)
+        val full = Tunnel("127.0.0.1", e2ePort, "probe.five", pinned, 0, noop)
+        full.connect("Test-passphrase-123", TunnelTest.totp("JBSWY3DPEHPK3PXP"))
+        try {
+            assertTrue(full.info().homeLogin)
+            full.trust("test phone", authorizedKey(kp.public as ECPublicKey, "test"))
+
+            val home = Tunnel("127.0.0.1", e2ePort, "probe.five", pinned, 0, noop)
+            home.connectHome(id) // no password, no code
+            try {
+                assertTrue(home.info().computers.isNotEmpty())
+                // Managing devices still takes password + code.
+                assertTrue(runCatching { home.trust("sneaky", authorizedKey(kp.public as ECPublicKey, "x")) }.isFailure)
+            } finally {
+                home.close()
+            }
+
+            full.untrust("test phone")
+            val again = runCatching { Tunnel("127.0.0.1", e2ePort, "probe.five", pinned, 0, noop).connectHome(id) }
+            assertTrue(again.exceptionOrNull()?.message.orEmpty(), again.exceptionOrNull()?.message.orEmpty().contains("home network"))
+        } finally {
+            full.close()
+        }
+    }
+
+    @Test
     fun suggestsThePagesOwnPort() {
         val pet = HubService("pet", "http", "/", "127.0.0.1:11435")
         assertEquals(11435, suggestedLinkPort(pet, emptySet()))

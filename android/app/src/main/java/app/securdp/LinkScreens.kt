@@ -103,6 +103,70 @@ fun PairLinkDialog(profile: Profile, service: HubService, store: ProfileStore, o
     )
 }
 
+/**
+ * Trusts this phone for home login on [profile]'s hub: a Keystore key whose
+ * public half the hub accepts without password or code, from the home
+ * network only. Needs the current password + code session.
+ */
+@Composable
+fun TrustHomeDialog(profile: Profile, store: ProfileStore, onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    var device by remember { mutableStateOf(Build.MODEL ?: "Phone") }
+    // A private address is already the home address; otherwise ask for one.
+    val privateHost = Regex("""^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)""").containsMatchIn(profile.host)
+    var homeHost by remember { mutableStateOf(profile.homeHost.ifEmpty { if (privateHost) profile.host else "" }) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+    fun trust() {
+        val name = device.trim()
+        if (name.isEmpty() || name.length > 40) { error = "Give this phone a name (up to 40 characters)"; return }
+        busy = true
+        error = null
+        thread(name = "securdp-trust") {
+            val alias = "home-" + UUID.randomUUID()
+            try {
+                val t = TunnelManager.tunnel ?: throw Exception("Not connected to the hub")
+                val pub = DeviceKeys.create(alias)
+                t.trust(name, authorizedKey(pub, "SecuRDP-home-$name"))
+                profile.homeKeyAlias.takeIf { it.isNotEmpty() }?.let { DeviceKeys.delete(it) }
+                store.setHome(profile.name, alias, name, homeHost.trim())
+                main.post {
+                    Toast.makeText(ctx, "Trusted. Use Local for ${profile.name} when you're home.", Toast.LENGTH_LONG).show()
+                    onDone()
+                }
+            } catch (e: Exception) {
+                DeviceKeys.delete(alias)
+                main.post { busy = false; error = e.message ?: "Couldn't trust this phone" }
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDone() },
+        title = { Text("Trust this phone at home") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "The Local button will log in without your password or code, using a key kept in this phone's secure storage. " +
+                        "The hub only accepts it from your home network.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(device, { device = it }, label = { Text("This phone's name (shown on the hub)") }, singleLine = true)
+                OutlinedTextField(
+                    homeHost, { homeHost = it.trim() }, label = { Text("Hub's home address (optional)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    supportingText = { Text("e.g. 192.168.1.65 - Local connects straight to it instead of through your router") },
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = { TextButton(onClick = ::trust, enabled = !busy) { Text(if (busy) "Trusting…" else "Trust") } },
+        dismissButton = { TextButton(onClick = onDone, enabled = !busy) { Text("Cancel") } },
+    )
+}
+
 /** One saved app link on the main screen: on/off, status, remove. */
 @Composable
 fun LinkCard(link: LinkConfig, status: String?, store: ProfileStore, onChanged: () -> Unit) {

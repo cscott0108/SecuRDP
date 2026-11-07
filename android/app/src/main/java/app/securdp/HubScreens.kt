@@ -117,8 +117,12 @@ fun HubScreen(
     onWeb: (HubService) -> Unit,
     onWebExternal: (HubService) -> Unit,
     onPairLink: (HubService) -> Unit,
+    homeDevice: String,
+    onTrustHome: () -> Unit,
+    onUntrustHome: () -> Unit,
     onClose: () -> Unit,
 ) {
+    var confirmUntrust by remember { mutableStateOf(false) }
     BackHandler(onBack = onClose)
     var keep by remember { mutableStateOf(false) }
     val external by TunnelManager.externalPages.collectAsStateWithLifecycle()
@@ -184,6 +188,26 @@ fun HubScreen(
                     }
                 }
             }
+            if (info.homeLogin) {
+                item { SectionTitle("This phone at home") }
+                item {
+                    Text(
+                        "Trust this phone to log in with the Local button - no password or code - but only while it's on your home network. " +
+                            "Away from home, Connect with your password and code as usual.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                item {
+                    if (homeDevice.isEmpty()) {
+                        OutlinedButton(onClick = onTrustHome, modifier = Modifier.fillMaxWidth()) { Text("🏠 Trust this phone at home…") }
+                    } else {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("✓ Trusted as \"$homeDevice\"", color = Good, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { confirmUntrust = true }) { Text("Stop trusting", color = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                }
+            }
             if (info.appLinks && info.services.isNotEmpty()) {
                 item { SectionTitle("App links") }
                 item {
@@ -198,6 +222,15 @@ fun HubScreen(
                 }
             }
         }
+    }
+    if (confirmUntrust) {
+        AlertDialog(
+            onDismissRequest = { confirmUntrust = false },
+            title = { Text("Stop trusting this phone?") },
+            text = { Text("Local stops working on this phone, and it's removed on the hub too. You can trust it again any time.") },
+            confirmButton = { TextButton(onClick = { confirmUntrust = false; onUntrustHome() }) { Text("Stop trusting") } },
+            dismissButton = { TextButton(onClick = { confirmUntrust = false }) { Text("Cancel") } },
+        )
     }
 }
 

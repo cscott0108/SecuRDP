@@ -9,6 +9,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -101,6 +103,8 @@ fun MainScreen(store: ProfileStore) {
     var links by remember { mutableStateOf(store.links()) }
     val linkStatus by LinkManager.status.collectAsStateWithLifecycle()
     var pairFor by remember { mutableStateOf<HubService?>(null) }
+    var localHelp by remember { mutableStateOf<String?>(null) } // Local tapped before this phone is trusted
+    var trustHome by remember { mutableStateOf(false) }
     // Bring the app links up if Android stopped them (e.g. after force-stop).
     LaunchedEffect(Unit) { if (links.any { it.enabled }) LinkManager.refresh(context) }
 
@@ -138,6 +142,19 @@ fun MainScreen(store: ProfileStore) {
                 onWeb = { screen = Screen.Web(it) },
                 onWebExternal = { TunnelManager.openExternal(context, hub.first, it, store) },
                 onPairLink = { pairFor = it },
+                homeDevice = profiles.firstOrNull { it.name == hub.first.name }?.homeDevice.orEmpty(),
+                onTrustHome = { trustHome = true },
+                onUntrustHome = {
+                    val pr = profiles.firstOrNull { it.name == hub.first.name }
+                    if (pr != null) {
+                        kotlin.concurrent.thread {
+                            runCatching { TunnelManager.tunnel?.untrust(pr.homeDevice) }
+                            DeviceKeys.delete(pr.homeKeyAlias)
+                            store.setHome(pr.name, "", "", pr.homeHost)
+                            android.os.Handler(android.os.Looper.getMainLooper()).post { profiles = store.load() }
+                        }
+                    }
+                },
                 onClose = { screen = Screen.Main },
             )
             is Screen.Files -> FilesScreen(
@@ -152,6 +169,12 @@ fun MainScreen(store: ProfileStore) {
         }
         pairFor?.let { svc ->
             PairLinkDialog(hub.first, svc, store) { pairFor = null; links = store.links() }
+        }
+        if (trustHome) {
+            TrustHomeDialog(profiles.firstOrNull { it.name == hub.first.name } ?: hub.first, store) {
+                trustHome = false
+                profiles = store.load()
+            }
         }
         return
     }
@@ -184,6 +207,14 @@ fun MainScreen(store: ProfileStore) {
                 ProfileCard(
                     p, busy,
                     onConnect = { connectTo = p },
+                    onLocal = {
+                        if (p.homeKeyAlias.isEmpty()) {
+                            localHelp = p.name
+                        } else {
+                            openWhenConnected = true
+                            TunnelManager.connectHome(context, p)
+                        }
+                    },
                     onEdit = { editing = p },
                     onDelete = { store.delete(p.name); profiles = store.load() },
                 )
@@ -226,6 +257,21 @@ fun MainScreen(store: ProfileStore) {
                 err
             },
             onDismiss = { adding = false; editing = null },
+        )
+    }
+
+    localHelp?.let { name ->
+        AlertDialog(
+            onDismissRequest = { localHelp = null },
+            confirmButton = { TextButton(onClick = { localHelp = null }) { Text("OK") } },
+            title = { Text("Local login isn't set up yet") },
+            text = {
+                Text(
+                    "Local connects without your password or code, but only on your home network. To set it up, " +
+                        "tap Connect for $name, log in as usual, and on the hub screen tap \"Trust this phone at home\". " +
+                        "(The hub's admin first ticks \"Trusted home devices\" for your user on its Users tab.)",
+                )
+            },
         )
     }
 
@@ -320,7 +366,9 @@ private fun StatusCard(state: TunnelState, context: android.content.Context, onO
 }
 
 @Composable
-private fun ProfileCard(p: Profile, busy: Boolean, onConnect: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun ProfileCard(
+    p: Profile, busy: Boolean, onConnect: () -> Unit, onLocal: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit,
+) {
     var confirmDelete by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -339,6 +387,8 @@ private fun ProfileCard(p: Profile, busy: Boolean, onConnect: () -> Unit, onEdit
             )
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onConnect, enabled = !busy) { Text("Connect") }
+                // No password or code; the hub allows it only on the home network.
+                OutlinedButton(onClick = onLocal, enabled = !busy) { Text("Local") }
                 TextButton(onClick = onEdit, enabled = !busy) { Text("Edit") }
                 TextButton(onClick = { confirmDelete = true }, enabled = !busy) {
                     Text("Delete", color = MaterialTheme.colorScheme.error)
@@ -364,13 +414,14 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
     var user by remember { mutableStateOf(initial?.username ?: "") }
     var rdpUser by remember { mutableStateOf(initial?.rdpUsername ?: "") }
     var computer by remember { mutableStateOf(initial?.computer ?: "") }
+    var homeHost by remember { mutableStateOf(initial?.homeHost ?: "") }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "Add computer" else "Edit ${initial.name}") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
                 OutlinedTextField(
                     host, { host = it }, label = { Text("Address (public IP or hostname)") }, singleLine = true,
@@ -387,6 +438,11 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
                     label = { Text("Hub computer (optional)") }, singleLine = true,
                     supportingText = { Text("Blank = pick from a list each time") },
                 )
+                OutlinedTextField(
+                    homeHost, { homeHost = it.trim() }, label = { Text("Hub's home address (optional)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    supportingText = { Text("For Local, e.g. 192.168.1.65. Blank = the address above") },
+                )
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
@@ -394,7 +450,7 @@ private fun ProfileDialog(initial: Profile?, onSave: (Profile) -> String?, onDis
             TextButton(onClick = {
                 error = onSave(
                     Profile(name, host, port.toIntOrNull() ?: 0, user, rdpUser,
-                        initial?.hostFingerprint ?: "", initial?.localPort ?: 0, computer),
+                        initial?.hostFingerprint ?: "", initial?.localPort ?: 0, computer, homeHost = homeHost),
                 )
             }) { Text("Save") }
         },

@@ -25,6 +25,7 @@ const (
 	//   A \t 1                              (the user may pair app links, 1.7+)
 	//   V \t version                        (the hub's SecuRDP version, 1.8+; see update.go)
 	//   P \t versionCode \t versionName     (the Android app the hub can hand out, 1.9+)
+	//   L \t 1                              (the user may trust home devices, 1.10+)
 	hubHost   = "hub.securdp"
 	filesHost = "files.securdp" // one file request per channel (see package files)
 	holdHost  = "hold.securdp"  // held open by a client browsing files or web pages
@@ -70,6 +71,9 @@ func (s *Server) sendHubInfo(nc ssh.NewChannel, user, loginComputer string) {
 		}
 		if u.AppLinks {
 			b.WriteString("A\t1\n")
+		}
+		if u.HomeLogin {
+			b.WriteString("L\t1\n")
 		}
 	}
 	io.WriteString(ch, b.String())

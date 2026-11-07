@@ -51,25 +51,48 @@ type Tunnel struct {
 // Connect authenticates to the gate. Call Listen (after Computers, for a
 // picker) to start forwarding.
 func Connect(p config.Profile, password, code string) (*Tunnel, error) {
+	t, err := dial(p, p.Host, ssh.KeyboardInteractive(func(name, instr string, qs []string, echos []bool) ([]string, error) {
+		ans := make([]string, len(qs))
+		for i, q := range qs {
+			lq := strings.ToLower(q)
+			switch {
+			case strings.Contains(lq, "password"):
+				ans[i] = password
+			case strings.Contains(lq, "code"), strings.Contains(lq, "verification"):
+				ans[i] = code
+			}
+		}
+		return ans, nil
+	}))
+	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
+		return nil, errors.New("login failed - check username, password and authenticator code (too many failures will block your IP for a while)")
+	}
+	return t, err
+}
+
+// ConnectHome logs in with this PC's trusted home key: no password or code.
+// The hub only accepts it from the home network, so it connects to the hub's
+// home address (p.HomeHost) when one is saved.
+func ConnectHome(p config.Profile, key ssh.Signer) (*Tunnel, error) {
+	host := p.Host
+	if p.HomeHost != "" {
+		host = p.HomeHost
+	}
+	t, err := dial(p, host, ssh.PublicKeys(key))
+	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
+		return nil, errors.New("the hub didn't accept this PC's home login - it only works on your home network (use Connect with password + code away from home), or it was removed on the hub")
+	}
+	return t, err
+}
+
+func dial(p config.Profile, host string, auth ssh.AuthMethod) (*Tunnel, error) {
 	cfg := &ssh.ClientConfig{
 		Config: ssh.Config{
 			KeyExchanges: []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519},
 			Ciphers:      []string{ssh.CipherChaCha20Poly1305, ssh.CipherAES256GCM},
 		},
 		User: p.Username,
-		Auth: []ssh.AuthMethod{ssh.KeyboardInteractive(func(name, instr string, qs []string, echos []bool) ([]string, error) {
-			ans := make([]string, len(qs))
-			for i, q := range qs {
-				lq := strings.ToLower(q)
-				switch {
-				case strings.Contains(lq, "password"):
-					ans[i] = password
-				case strings.Contains(lq, "code"), strings.Contains(lq, "verification"):
-					ans[i] = code
-				}
-			}
-			return ans, nil
-		})},
+		Auth: []ssh.AuthMethod{auth},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fp := ssh.FingerprintSHA256(key)
 			if p.HostFingerprint == "" {
@@ -83,7 +106,11 @@ func Connect(p config.Profile, password, code string) (*Tunnel, error) {
 		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519},
 		Timeout:           15 * time.Second,
 	}
-	c, err := ssh.Dial("tcp", net.JoinHostPort(p.Host, fmt.Sprint(p.Port)), cfg)
+	addr := net.JoinHostPort(host, fmt.Sprint(p.Port))
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		addr = host // a home address given as host:port
+	}
+	c, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		var uh *UnknownHostError
 		var hc *HostChangedError
@@ -92,9 +119,6 @@ func Connect(p config.Profile, password, code string) (*Tunnel, error) {
 		}
 		if errors.As(err, &hc) {
 			return nil, hc
-		}
-		if strings.Contains(err.Error(), "unable to authenticate") {
-			return nil, errors.New("login failed - check username, password and authenticator code (too many failures will block your IP for a while)")
 		}
 		return nil, err
 	}

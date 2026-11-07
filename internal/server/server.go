@@ -38,7 +38,8 @@ type Server struct {
 	static   bool             // tests: never reload from disk
 	lastStep map[string]int64 // TOTP replay protection per user
 	sessions atomic.Int32
-	links    atomic.Int32 // app-link sessions (see applinks.go)
+	links    atomic.Int32        // app-link sessions (see applinks.go)
+	homeNets func() []*net.IPNet // the home network for home devices (default: this PC's private subnets)
 }
 
 // LoadOrCreateHostKey returns the server's ed25519 host key, creating it once.
@@ -295,6 +296,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 	computer := conn.Permissions.Extensions["computer"]
 	device, service := conn.Permissions.Extensions["device"], conn.Permissions.Extensions["service"]
 	what := "computer=" + computer
+	if home := conn.Permissions.Extensions["home"]; home != "" {
+		what += fmt.Sprintf(" home device=%q (no password, home network)", home)
+	}
 	if device != "" {
 		what = fmt.Sprintf("device=%q app link to %s", device, service)
 		if n := s.links.Add(1); n > maxLinkSessions {
@@ -394,6 +398,13 @@ func (s *Server) handle(ctx context.Context, c net.Conn, sc *ssh.ServerConfig) {
 			go s.serveAPK(nc, user, ip)
 			continue
 		case host == pairHost:
+			// Adding or removing devices always takes the password + code,
+			// never just a trusted home device.
+			if conn.Permissions.Extensions["home"] != "" {
+				nc.Reject(ssh.Prohibited, "log in with password + code to manage devices")
+				s.log.Printf("REJECT %s user=%s: device management from a home-device login", ip, user)
+				continue
+			}
 			go s.pair(nc, user, ip)
 			continue
 		case host == holdHost:

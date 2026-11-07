@@ -18,6 +18,14 @@ data class Profile(
     val computer: String = "",
     /** Hub profiles: a loopback port per hub PC, for the same reason as [localPort]. */
     val computerPorts: Map<String, Int> = emptyMap(),
+    /**
+     * Trusted home login (the Local button): the Keystore key alias ("" = not
+     * trusted), the name it's trusted under on the hub, and the hub's home
+     * address (host or host:port, "" = [host]).
+     */
+    val homeKeyAlias: String = "",
+    val homeDevice: String = "",
+    val homeHost: String = "",
 )
 
 /**
@@ -51,6 +59,9 @@ class ProfileStore(context: Context) {
                 localPort = o.optInt("localPort"),
                 computer = o.optString("computer"),
                 computerPorts = ports?.keys()?.asSequence()?.associateWith { ports.getInt(it) } ?: emptyMap(),
+                homeKeyAlias = o.optString("homeKeyAlias"),
+                homeDevice = o.optString("homeDevice"),
+                homeHost = o.optString("homeHost"),
             )
         }
     }
@@ -64,6 +75,7 @@ class ProfileStore(context: Context) {
                 put("hostFingerprint", it.hostFingerprint); put("localPort", it.localPort)
                 put("computer", it.computer)
                 put("computerPorts", JSONObject(it.computerPorts as Map<*, *>))
+                put("homeKeyAlias", it.homeKeyAlias); put("homeDevice", it.homeDevice); put("homeHost", it.homeHost)
             })
         }
         prefs.edit().putString("list", arr.toString()).apply()
@@ -87,7 +99,7 @@ class ProfileStore(context: Context) {
         }
         var np = p.copy(
             name = name, host = host, username = user, rdpUsername = p.rdpUsername.trim(),
-            computer = p.computer.trim().lowercase(),
+            computer = p.computer.trim().lowercase(), homeHost = p.homeHost.trim(),
         )
         if (idx >= 0) {
             val old = list[idx]
@@ -95,18 +107,31 @@ class ProfileStore(context: Context) {
                 hostFingerprint = if (old.host == host && old.port == p.port) old.hostFingerprint else "",
                 localPort = old.localPort,
                 computerPorts = old.computerPorts,
+                homeKeyAlias = old.homeKeyAlias,
+                homeDevice = old.homeDevice,
             )
             list[idx] = np
         } else {
             val used = usedPorts(list)
-            np = np.copy(hostFingerprint = "", localPort = (13389..13499).first { it !in used }, computerPorts = emptyMap())
+            np = np.copy(
+                hostFingerprint = "", localPort = (13389..13499).first { it !in used }, computerPorts = emptyMap(),
+                homeKeyAlias = "", homeDevice = "",
+            )
             list += np
         }
         save(list)
         return null
     }
 
-    fun delete(name: String) = save(load().filter { it.name != name })
+    /** Deletes a saved computer (and its home key). */
+    fun delete(name: String) {
+        load().firstOrNull { it.name == name }?.homeKeyAlias?.takeIf { it.isNotEmpty() }?.let { DeviceKeys.delete(it) }
+        save(load().filter { it.name != name })
+    }
+
+    /** Records (or with alias "" clears) this phone's trusted home login for a profile. */
+    fun setHome(name: String, alias: String, device: String, homeHost: String) =
+        save(load().map { if (it.name == name) it.copy(homeKeyAlias = alias, homeDevice = device, homeHost = homeHost) else it })
 
     fun pin(name: String, fingerprint: String) =
         save(load().map { if (it.name == name) it.copy(hostFingerprint = fingerprint) else it })

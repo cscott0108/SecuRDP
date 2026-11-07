@@ -419,7 +419,7 @@ function renderUsers() {
     );
     if (hub.mode === "hub") card.append(userAccess(u, hub.computers || []));
     if ((hub.folders || []).length || (hub.services || []).length) card.append(userGrants(u, hub));
-    if ((hub.services || []).length) card.append(userAppLinks(u));
+    card.append(userAppLinks(u, (hub.services || []).length > 0));
     box.append(card);
   }
 }
@@ -450,26 +450,34 @@ function userGrants(u, hub) {
 
 // App links: devices (e.g. a phone app running in the background) that reach
 // one granted web page with a key instead of the password + code prompt.
-function userAppLinks(u) {
-  const cb = el("input", { type: "checkbox" });
-  cb.checked = !!u.app_links;
-  cb.addEventListener("change", () => run(null, async () => {
-    if (!cb.checked && (u.devices || []).length && !confirm(`Turn off app links for ${u.username}? This also removes their ${u.devices.length} paired device(s).`)) {
-      cb.checked = true;
-      return;
-    }
-    await api("users/applinks", { username: u.username, enabled: cb.checked });
-    await refresh();
-  }));
-  const box = el("div", { class: "access" },
-    el("label", { class: "check" }, cb, el("span", {}, "App links")),
-    el("span", { class: "muted small" }, " lets this user pair a device in the Android app, so a background app there can reach one of their web pages without a login. It can reach nothing else."));
+function userAppLinks(u, withLinks) {
+  // One checkbox per kind of paired device; turning one off removes that kind.
+  const toggle = (label, on, endpoint, home, help) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = !!on;
+    const mine = (u.devices || []).filter((d) => !!d.home === home);
+    cb.addEventListener("change", () => run(null, async () => {
+      if (!cb.checked && mine.length && !confirm(`Turn off ${label.toLowerCase()} for ${u.username}? This also removes their ${mine.length} device(s) of that kind.`)) {
+        cb.checked = true;
+        return;
+      }
+      await api(endpoint, { username: u.username, enabled: cb.checked });
+      await refresh();
+    }));
+    return [el("label", { class: "check" }, cb, el("span", {}, label)), el("span", { class: "muted small device" }, help)];
+  };
+  const box = el("div", { class: "access" });
+  box.append(...toggle("Trusted home devices", u.home_login, "users/homelogin", true,
+    "Lets this user trust a PC or phone (while logged in with password + code) to log in with the Local button - no password or code - but only from your home network."));
+  if (withLinks) box.append(...toggle("App links", u.app_links, "users/applinks", false,
+    "Lets this user pair a device in the Android app, so a background app there can reach one of their web pages without a login. It can reach nothing else."));
   for (const d of u.devices || []) {
+    const what = d.home ? " · home login (home network only)" : ` → ${d.service}`;
     box.append(el("div", { class: "row-between device" },
-      el("span", {}, "📱 ", el("b", {}, d.name), el("span", { class: "muted small" }, ` → ${d.service}, paired ${new Date(d.added * 1000).toLocaleDateString()}`)),
+      el("span", {}, d.home ? "🏠 " : "🔗 ", el("b", {}, d.name), el("span", { class: "muted small" }, `${what}, paired ${new Date(d.added * 1000).toLocaleDateString()}`)),
       el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
-        if (!confirm(`Remove ${d.name}? Its app link stops working at once.`)) return;
-        await api("users/unpair", { username: u.username, device: d.name });
+        if (!confirm(`Remove ${d.name}? It stops working at once.`)) return;
+        await api("users/unpair", { username: u.username, device: d.name, home: !!d.home });
         await refresh();
       }) }, "Remove")));
   }
@@ -725,6 +733,9 @@ function renderProfiles() {
             local
               ? el("button", { class: "danger", onclick: (e) => run(e.target, async () => { await api("disconnect", { name: p.name }); await refresh(); }) }, "Disconnect")
               : el("button", { class: "primary", onclick: () => { form.classList.toggle("hidden"); pw.focus(); } }, "Connect…"),
+            !local && p.home_device
+              ? el("button", { title: "Log in without password or code - works on your home network only", onclick: (e) => run(e.target, () => connectHome(p.name)) }, "Local")
+              : "",
             el("button", { onclick: () => editProfile(p) }, "Edit"),
             el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
               if (!confirm(`Delete ${p.name}?`)) return;
@@ -739,6 +750,18 @@ function renderProfiles() {
       )
     );
   }
+}
+
+// The Local button: this PC's trusted home login (home network only).
+async function connectHome(name) {
+  const r = await api("connect", { name, home: true });
+  if (r.status === "hub") {
+    openHub(name, r.info);
+    await refresh();
+    return;
+  }
+  toast("Connected. Remote Desktop is opening…");
+  await refresh();
 }
 
 async function connect(name, password, code, trust) {
@@ -765,6 +788,38 @@ const store = {
   set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
 };
 
+// "This PC at home" on the hub screen: trust / stop trusting this PC.
+function renderHomeTrust(name, info) {
+  const p = (state.profiles || []).find((x) => x.name === name);
+  $("hub-home-sec").classList.toggle("hidden", !info.home_login || !p);
+  const box = $("hub-home-box");
+  box.innerHTML = "";
+  if (!info.home_login || !p) return;
+  if (p.home_device) {
+    box.append(el("div", { class: "row-between" },
+      el("span", {}, "✓ Trusted as ", el("b", {}, p.home_device), el("span", { class: "muted small" }, p.home_host ? ` · home address ${p.home_host}` : "")),
+      el("button", { class: "danger", onclick: (e) => run(e.target, async () => {
+        if (!confirm(`Stop trusting this PC for home login? It's removed on the hub too.`)) return;
+        await api("hub/untrust", { name });
+        await refresh();
+        renderHomeTrust(name, info);
+      }) }, "Stop trusting")));
+    return;
+  }
+  const dev = el("input", { placeholder: "This PC's name (blank = its computer name)" });
+  const privateHost = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(p.host) ? p.host : "";
+  const host = el("input", { placeholder: "Hub's home address, e.g. 192.168.1.65" });
+  host.value = p.home_host || privateHost;
+  box.append(el("div", { class: "login-form inline" }, dev, host,
+    el("button", { class: "primary", onclick: (e) => run(e.target, async () => {
+      const r = await api("hub/trust", { name, device: dev.value.trim(), home_host: host.value.trim() });
+      toast(`Trusted as ${r.device}. Use Local on the Connect tab when you're home.`, "ok");
+      await refresh();
+      renderHomeTrust(name, info);
+    }) }, "Trust this PC")));
+  box.append(el("p", { class: "muted small" }, "The home address lets Local connect straight to the hub on your network instead of through your router's public address."));
+}
+
 function openHub(name, info) {
   hubView.name = name;
   hubView.info = info;
@@ -774,6 +829,7 @@ function openHub(name, info) {
   $("hub-rdp-sec").classList.toggle("hidden", !comps.length);
   $("hub-files-sec").classList.toggle("hidden", !folders.length);
   $("hub-web-sec").classList.toggle("hidden", !services.length);
+  renderHomeTrust(name, info);
   $("hub-rdp").innerHTML = "";
   for (const c of comps) {
     $("hub-rdp").append(el("button", {
@@ -1076,6 +1132,7 @@ function editProfile(p) {
   $("pf-rdpuser").value = p ? p.rdp_username || "" : "";
   $("pf-full").checked = p ? p.rdp_fullscreen : false;
   $("pf-computer").value = p ? p.computer || "" : "";
+  $("pf-homehost").value = p ? p.home_host || "" : "";
   $("pf-name").focus();
 }
 $("add-profile").addEventListener("click", () => editProfile(null));
@@ -1088,6 +1145,7 @@ $("pf-save").addEventListener("click", (e) =>
         name: $("pf-name").value, host: $("pf-host").value, port: +$("pf-port").value,
         username: $("pf-user").value, rdp_username: $("pf-rdpuser").value, rdp_fullscreen: $("pf-full").checked,
         computer: $("pf-computer").value.trim().toLowerCase(),
+        home_host: $("pf-homehost").value.trim(),
       },
     });
     $("profile-form").classList.add("hidden");

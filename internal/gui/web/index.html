@@ -56,6 +56,7 @@
       <label>SecuRDP username<input id="pf-user" autocomplete="off"></label>
       <label>Windows username on that PC <span class="muted">(optional)</span><input id="pf-rdpuser" placeholder="e.g. john or MicrosoftAccount\you@outlook.com"></label>
       <label>Hub computer <span class="muted">(optional - blank = pick from a list each time)</span><input id="pf-computer" placeholder="e.g. desktop" autocomplete="off"></label>
+      <label>Hub's home address <span class="muted">(optional - for the Local button, e.g. 192.168.1.65; blank = the address above)</span><input id="pf-homehost" placeholder="e.g. 192.168.1.65" autocomplete="off"></label>
       <label class="check"><input type="checkbox" id="pf-full"> Open Remote Desktop full screen</label>
     </div>
     <div class="actions">
@@ -324,6 +325,11 @@
       <p class="muted small">Open in SecuRDP's own window, or in your usual browser (Chrome, Edge…) through the same tunnel - handy for pages with downloads or pop-ups.</p>
       <div id="hub-web" class="tile-row"></div>
       <div id="hub-external" class="ext-list"></div>
+    </section>
+    <section id="hub-home-sec" class="hidden">
+      <h3>This PC at home</h3>
+      <p class="muted small">Trust this PC to log in with the <b>Local</b> button - no password or code - but only while it's on your home network. Away from home, use Connect with your password and code as usual.</p>
+      <div id="hub-home-box"></div>
     </section>
   </div>
 

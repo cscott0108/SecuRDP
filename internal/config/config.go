@@ -86,20 +86,26 @@ type User struct {
 	// Files and web services are opt-in: only the names listed here.
 	Folders  []string `json:"folders,omitempty"`
 	Services []string `json:"services,omitempty"`
-	// AppLinks lets the user pair devices (see Device). Off by default.
-	AppLinks bool     `json:"app_links,omitempty"`
-	Devices  []Device `json:"devices,omitempty"`
+	// AppLinks lets the user pair app-link devices (see Device). Off by default.
+	AppLinks bool `json:"app_links,omitempty"`
+	// HomeLogin lets the user trust devices for login without password or
+	// code, from the home network only (see Device.Home). Off by default.
+	HomeLogin bool     `json:"home_login,omitempty"`
+	Devices   []Device `json:"devices,omitempty"`
 }
 
-// Device is an app link: a key held by one of the user's devices that may
-// reach a single granted web service without the password + code prompt
-// (for background apps). It can reach nothing else, and is paired from a
-// full password + code session.
+// Device is a key held by one of the user's devices, paired from a full
+// password + code session. Two kinds:
+//   - an app link: reaches the single web service Service, from anywhere,
+//     for background apps; it can reach nothing else.
+//   - a home device (Home): logs in as the user, without password or code,
+//     but only from the home network.
 type Device struct {
-	Name    string `json:"name"`    // shown in the UI, unique per user
-	Key     string `json:"key"`     // public key, authorized_keys format
-	Service string `json:"service"` // the one web service it may reach
-	Added   int64  `json:"added"`   // unix time
+	Name    string `json:"name"`              // shown in the UI, unique per user and kind
+	Key     string `json:"key"`               // public key, authorized_keys format
+	Service string `json:"service,omitempty"` // app links: the one web service it may reach
+	Home    bool   `json:"home,omitempty"`    // a trusted home device instead of an app link
+	Added   int64  `json:"added"`             // unix time
 }
 
 // MaxDevices caps the paired devices per user.
@@ -113,27 +119,28 @@ func ValidateDeviceName(n string) error {
 	return nil
 }
 
-// FindDevice returns the user's paired device with that name.
-func (u *User) FindDevice(name string) *Device {
-	for i := range u.Devices {
-		if strings.EqualFold(u.Devices[i].Name, name) {
-			return &u.Devices[i]
-		}
-	}
-	return nil
-}
-
-// RemoveDevice unpairs a device; it reports whether one was removed.
-func (u *User) RemoveDevice(name string) bool {
+// RemoveDevice unpairs a device of the given kind; it reports whether one was removed.
+func (u *User) RemoveDevice(name string, home bool) bool {
 	out := u.Devices[:0]
 	for _, d := range u.Devices {
-		if !strings.EqualFold(d.Name, name) {
+		if !strings.EqualFold(d.Name, name) || d.Home != home {
 			out = append(out, d)
 		}
 	}
 	removed := len(out) != len(u.Devices)
 	u.Devices = out
 	return removed
+}
+
+// RemoveDeviceKind drops all of the user's devices of one kind.
+func (u *User) RemoveDeviceKind(home bool) {
+	out := u.Devices[:0]
+	for _, d := range u.Devices {
+		if d.Home != home {
+			out = append(out, d)
+		}
+	}
+	u.Devices = out
 }
 
 // SharedFolder is a folder on the gate PC that granted users can browse.
@@ -469,6 +476,12 @@ type Profile struct {
 	// address so Remote Desktop keeps a separate saved login per PC.
 	Computer    string            `json:"computer,omitempty"`
 	ComputerIPs map[string]string `json:"computer_ips,omitempty"`
+	// Trusted home login (Local button): this PC's key, DPAPI-protected for
+	// this Windows user; the name it is trusted under on the hub; and the
+	// hub's home address (host or host:port, "" = Host).
+	HomeKey    string `json:"home_key,omitempty"`
+	HomeDevice string `json:"home_device,omitempty"`
+	HomeHost   string `json:"home_host,omitempty"`
 }
 
 func (c *Client) usedIPs() map[string]bool {

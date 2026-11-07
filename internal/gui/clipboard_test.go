@@ -111,7 +111,7 @@ func clipboardText() (string, bool) {
 	}
 	p, _, _ := procGlobalLock.Call(h)
 	defer procGlobalUnlock.Call(h)
-	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(p))), true
+	return windows.UTF16PtrToString(*(**uint16)(unsafe.Pointer(&p))), true
 }
 
 func setClipboardText(s string) {
@@ -123,7 +123,7 @@ func setClipboardText(s string) {
 	u, _ := windows.UTF16FromString(s)
 	h, _, _ := procGlobalAlloc.Call(0x0002, uintptr(len(u)*2)) // GMEM_MOVEABLE
 	p, _, _ := procGlobalLock.Call(h)
-	copy(unsafe.Slice((*uint16)(unsafe.Pointer(p)), len(u)), u)
+	copy(unsafe.Slice(*(**uint16)(unsafe.Pointer(&p)), len(u)), u) // memory from GlobalLock, not Go's
 	procGlobalUnlock.Call(h)
 	procSetClipboardData.Call(cfUnicodeText, h)
 }

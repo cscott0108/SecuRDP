@@ -38,6 +38,7 @@ object TunnelManager {
 
     // Credentials stay in memory only, never in an Intent or on disk.
     internal var pending: Triple<Profile, String, String>? = null
+    internal var pendingHome = false // the Local button: log in with the home key
     internal var tunnel: Tunnel? = null
 
     internal fun set(s: TunnelState) { _state.value = s }
@@ -45,9 +46,19 @@ object TunnelManager {
     fun connect(context: Context, profile: Profile, password: String, code: String) {
         if (tunnel != null) return
         pending = Triple(profile, password, code)
+        pendingHome = false
         set(TunnelState.Connecting(profile))
         val intent = Intent(context, TunnelService::class.java).setAction(TunnelService.ACTION_START)
         context.startForegroundService(intent)
+    }
+
+    /** The Local button: logs in with this phone's trusted home key (home network only). */
+    fun connectHome(context: Context, profile: Profile) {
+        if (tunnel != null) return
+        pending = Triple(profile, "", "")
+        pendingHome = true
+        set(TunnelState.Connecting(profile))
+        context.startForegroundService(Intent(context, TunnelService::class.java).setAction(TunnelService.ACTION_START))
     }
 
     fun disconnect() {
@@ -137,7 +148,11 @@ class TunnelService : Service() {
 
     private fun start() {
         val (profile, password, code) = TunnelManager.pending ?: return stopSelfSafely()
+        val home = TunnelManager.pendingHome
         TunnelManager.pending = null
+        TunnelManager.pendingHome = false
+        // Local logins go straight to the hub's home address when one is saved.
+        val (host, port) = if (home) homeAddress(profile) else profile.host to profile.port
         current = null
         computer = null
         hubInfo = null
@@ -145,7 +160,7 @@ class TunnelService : Service() {
 
         thread(name = "securdp-connect") {
             val t = Tunnel(
-                host = profile.host, port = profile.port, username = profile.username,
+                host = host, port = port, username = profile.username,
                 pinnedFingerprint = profile.hostFingerprint, localPort = profile.localPort,
                 listener = object : Tunnel.Listener {
                     override fun onActiveChanged(active: Int) {
@@ -165,7 +180,13 @@ class TunnelService : Service() {
                 },
             )
             try {
-                t.connect(password, code)
+                if (home) {
+                    val id = DeviceKeys.identity(profile.homeKeyAlias)
+                        ?: throw Exception("This phone's home key is missing - connect with your password and code, then trust it again.")
+                    t.connectHome(id)
+                } else {
+                    t.connect(password, code)
+                }
                 TunnelManager.tunnel = t
                 val info = t.info()
                 val saved = info.computers.firstOrNull { it.name == profile.computer && profile.computer.isNotEmpty() }
@@ -298,4 +319,12 @@ fun openRemoteDesktop(context: Context, profile: Profile) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.microsoft.rdc.androidx")).addFlags(newTask))
     } catch (_: ActivityNotFoundException) {
     }
+}
+
+/** The hub's home address for Local logins: [Profile.homeHost] (host or host:port), else the usual address. */
+fun homeAddress(p: Profile): Pair<String, Int> {
+    val h = p.homeHost.trim()
+    if (h.isEmpty()) return p.host to p.port
+    val port = h.substringAfterLast(':', "").toIntOrNull()
+    return if (port != null && h.count { it == ':' } == 1) h.substringBeforeLast(':') to port else h to p.port
 }

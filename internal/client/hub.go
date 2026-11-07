@@ -30,6 +30,7 @@ type HubInfo struct {
 	Folders   []HubFolder   `json:"folders"`
 	Services  []HubService  `json:"services"`
 	Version   string        `json:"version,omitempty"` // the hub's SecuRDP version (1.8+ hubs)
+	HomeLogin bool          `json:"home_login"`        // this login may trust devices for home login (1.10+ hubs)
 }
 
 // readAll opens a pseudo destination and reads its whole reply, giving up
@@ -70,6 +71,8 @@ func (t *Tunnel) Info() (*HubInfo, error) {
 			switch {
 			case f[0] == "V" && len(f) == 2:
 				info.Version = f[1]
+			case f[0] == "L" && len(f) == 2:
+				info.HomeLogin = f[1] == "1"
 			case f[0] == "c" && len(f) == 4:
 				info.Computers = append(info.Computers, HubComputer{f[1], f[2] == "1", f[3] == "1"})
 			case f[0] == "f" && len(f) == 3:
@@ -91,6 +94,37 @@ func (t *Tunnel) Info() (*HubInfo, error) {
 	list, err := t.Computers()
 	info.Computers = list
 	return info, err
+}
+
+// Trust registers this device's public key (authorized_keys format) on the
+// hub for home login; Untrust removes it. Needs a password + code login.
+func (t *Tunnel) Trust(device, publicKey string) error {
+	return t.pairRequest("trust\t" + device + "\t" + publicKey)
+}
+
+func (t *Tunnel) Untrust(device string) error { return t.pairRequest("untrust\t" + device) }
+
+func (t *Tunnel) pairRequest(line string) error {
+	ch, err := t.ssh.Dial("tcp", "pair.securdp:0")
+	if err != nil {
+		return fmt.Errorf("the hub refused: %w", err)
+	}
+	defer ch.Close()
+	if _, err := io.WriteString(ch, line+"\n"); err != nil {
+		return err
+	}
+	reply, err := bufio.NewReader(io.LimitReader(ch, 4096)).ReadString('\n')
+	if err != nil {
+		return errors.New("no reply from the hub (it may need updating)")
+	}
+	f := strings.SplitN(strings.TrimRight(reply, "\r\n"), "\t", 2)
+	if f[0] != "ok" {
+		if len(f) == 2 {
+			return errors.New(f[1])
+		}
+		return errors.New("the hub refused")
+	}
+	return nil
 }
 
 // DownloadUpdate fetches the hub's own securdp.exe into w, checking its

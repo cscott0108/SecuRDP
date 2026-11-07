@@ -36,6 +36,7 @@ import (
 //	hub computers: desktop (default, echo) and laptop (greets "laptop;" then echoes).
 //	shared folders: media (read-only samples), drop (writable); web page: status.
 //	probe.four may pair app links (devices reaching "status" by key).
+//	probe.five may trust home devices; the "home network" is loopback.
 func TestServeForExternalClient(t *testing.T) {
 	addr := os.Getenv("SECURDP_SERVE_ADDR")
 	if addr == "" {
@@ -76,6 +77,7 @@ func TestServeForExternalClient(t *testing.T) {
 		{Username: "probe.two", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
 		{Username: "probe.three", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
 		{Username: "probe.four", PasswordHash: hash, TOTPSecret: enc, Enabled: true, AppLinks: true},
+		{Username: "probe.five", PasswordHash: hash, TOTPSecret: enc, Enabled: true, HomeLogin: true},
 	}
 
 	// Files & web: "media" (read-only sample images, plus SECURDP_SERVE_MEDIA
@@ -133,6 +135,8 @@ func TestServeForExternalClient(t *testing.T) {
 	log, _ := logx.Open(os.DevNull, os.Stdout)
 	s := &Server{log: log, cfg: cfg, static: true, lastStep: map[string]int64{},
 		limiter: auth.NewLimiter(10, time.Minute, time.Minute, 5)}
+	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
+	s.homeNets = func() []*net.IPNet { return []*net.IPNet{loop} }
 	sc := s.sshConfig(signer)
 
 	ln, err := net.Listen("tcp", addr)
