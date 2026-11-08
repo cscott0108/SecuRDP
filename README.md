@@ -168,6 +168,47 @@ How it works and what it can't do:
 - **To revoke:** tap **Remove** on the phone (also removed on the hub if you're connected), or tap **Remove** next to the device on the hub's *Users* tab. Removing the page, ungranting it, or turning App links off for the user also stops the link. Unknown keys are logged but don't count towards IP bans.
 - Every app on the phone can reach a loopback port, so the page should check its own token. The link controls who reaches the hub, not which app on the phone uses it.
 
+#### Connecting your own app or game
+
+Use this when you write, or set up, a program that runs on the hub PC (a game server, an AI helper, a home tool), plus an Android app that talks to it.
+
+**On the hub PC: the program**
+1. **Listen on TCP.** Use a fixed port, e.g. `127.0.0.1:11435`. Listening on `127.0.0.1` alone is enough, and safest: the link connects from the hub itself.
+   - **Any TCP protocol works:** HTTP, WebSockets, gRPC or your own. SecuRDP passes the bytes through unchanged. **UDP isn't carried**, so a game that only speaks UDP needs a TCP mode.
+   - **Serve plain HTTP, not HTTPS.** The tunnel is already encrypted, and an HTTPS certificate wouldn't match `127.0.0.1` on the phone.
+   - **Accept `Host: 127.0.0.1:<port>`.** Requests arrive with the phone's loopback address, so turn off any Host or Origin check that refuses that (some tools have a "cross-site" or "allowed hosts" setting).
+2. **Check your own token.** For example, require an `Authorization: Bearer …` header or a secret in the first message. Any app on the phone can reach the port.
+3. **Keep it running.** Start it with the PC, e.g. as a scheduled task "At startup" or a Windows service. SecuRDP doesn't start or watch it.
+
+**On the hub PC: SecuRDP** (run as administrator)
+1. *Files & Web* → add a web page, e.g. name `pet`, address `http://127.0.0.1:11435`. **Test** checks the port answers. A program that doesn't speak HTTP can still pass, because the link only needs the TCP port.
+2. *Users* → tick the page for your user, and tick **App links**.
+
+**On the phone**
+1. In SecuRDP, connect to the hub with password + code.
+2. Under **App links**, tap **Link an app to pet** → **Pair**. Keep the suggested port (the page's own, here 11435) so the app uses the same address everywhere.
+3. Check the link shows **Ready** on the main screen.
+
+**In your Android app**
+- **Connect to `http://127.0.0.1:<port>`** (here `http://127.0.0.1:11435`), the same way you would on the PC.
+- **Allow plain HTTP to loopback.** Android blocks cleartext HTTP by default, so add a network security config:
+  ```xml
+  <!-- res/xml/network_security_config.xml, referenced from <application android:networkSecurityConfig="@xml/network_security_config"> -->
+  <network-security-config>
+    <domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="false">127.0.0.1</domain></domain-config>
+  </network-security-config>
+  ```
+- **Give the first request a few seconds.** It opens the SSH login (usually 1–3 s), and later requests are immediate. If nothing answers, the link is off, the phone is offline, or the hub refused the key, and SecuRDP's main screen shows which.
+- **Optional, at home:** try the hub's home address first (e.g. `http://192.168.1.65:11435`, if the program listens on `0.0.0.0` and the firewall allows it), then fall back to `127.0.0.1`.
+- **Long connections** such as WebSockets or game sessions keep the link up. It logs out a minute after the last connection closes, and the next connection logs in again.
+
+**Troubleshooting**
+- **Link shows "The hub didn't open pet (is it running?)":** the program isn't running, or isn't listening on the address you entered. **Test** on *Files & Web* checks it from the hub.
+- **Link shows "refused this phone's key":** the device was removed on the hub, App links was turned off, or the page was ungranted. Pair again.
+- **Link shows "Can't reach the hub":** the phone is offline, or the hub's address or port changed.
+- The hub's activity log (*Activity log* tab) records every key login and refusal.
+- **Program answers 403 or "invalid host":** its Host or Origin check is refusing `127.0.0.1:<port>` (see step 1 above).
+
 ### Local login at home (1.10+)
 
 The **Local** button connects **without password or code**, but only from your home network.
