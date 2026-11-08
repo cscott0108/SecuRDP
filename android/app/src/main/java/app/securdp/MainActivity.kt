@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -347,6 +348,8 @@ private fun StatusCard(state: TunnelState, context: android.content.Context, onO
                     if (state.info != null) OutlinedButton(onClick = onOpenHub) { Text("Hub") }
                     OutlinedButton(onClick = { TunnelManager.disconnect() }) { Text("Disconnect") }
                 }
+                Spacer(Modifier.height(12.dp))
+                LoginModeBanner()
             }
         }
         is TunnelState.Hub -> Card(
@@ -359,6 +362,8 @@ private fun StatusCard(state: TunnelState, context: android.content.Context, onO
                     Button(onClick = onOpenHub) { Text("Open hub") }
                     OutlinedButton(onClick = { TunnelManager.disconnect() }) { Text("Disconnect") }
                 }
+                Spacer(Modifier.height(12.dp))
+                LoginModeBanner()
             }
         }
         else -> {}

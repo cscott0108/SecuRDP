@@ -128,6 +128,7 @@ table.fb-details { width: 100%; border-collapse: collapse; font-size: 13px; }
 .addr-row pre { margin: 0; flex: 1; min-width: 200px; }
 .pill.good { color: var(--good); border-color: var(--good); }
 .pill.bad { color: var(--bad); border-color: var(--bad); }
+.pill.warn { color: var(--warn, #b7791f); border-color: var(--warn, #b7791f); }
 .good-text { color: var(--good); }
 .bad-text { color: var(--bad); }
 .warn-text { color: var(--bad); font-weight: 500; }

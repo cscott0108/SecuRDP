@@ -170,7 +170,7 @@ How it works and what it can't do:
 
 #### Connecting your own app or game
 
-Use this when you write, or set up, a program that runs on the hub PC (a game server, an AI helper, a home tool), plus an Android app that talks to it.
+The Windows app's **Help** tab has the same guide. Use this when you write, or set up, a program that runs on the hub PC (a game server, an AI helper, a home tool), plus an Android app that talks to it.
 
 **On the hub PC: the program**
 1. **Listen on TCP.** Use a fixed port, e.g. `127.0.0.1:11435`. Listening on `127.0.0.1` alone is enough, and safest: the link connects from the hub itself.
@@ -231,6 +231,19 @@ How it's protected:
   - **Remove** next to the device on the hub's *Users* tab works as well.
   - Unticking **Trusted home devices** removes all of that user's home devices.
 - Each Local login is logged (`LOGIN … home device="…" (no password, home network)`), and attempts from outside the home network are logged as refused.
+
+#### Switching to remote, and network drops (1.11+)
+
+- **Leaving home:** while connected with Local, tap **Switch to remote** (Windows: Connect tab; Android: main or hub screen) and enter your password + code.
+  - SecuRDP logs in through the profile's public address *before* letting go of the home login.
+  - Remote Desktop, open files and web pages stay open on the same local ports. Connections already open finish on the home login.
+  - Away from home a password + code are always needed. A trusted device alone never logs in remotely, because on a phone the key and the authenticator usually live on the same device.
+- **Network drops** (Wi-Fi to mobile data, walking out of range) no longer end the session. The local ports stay open for **5 minutes** and the app shows *Connection lost*:
+  - **A Local login** reconnects by itself every 10 seconds once you're back on the home network, or tap **Continue remotely** with password + code.
+  - **A remote login:** tap **Reconnect** and enter your password + code.
+  - Remote Desktop reconnects by itself once the tunnel is back, and the Windows session is where you left it. After 5 minutes, or on Disconnect, everything closes as before.
+  - A dropped connection is noticed within about 20–45 seconds. A connection the hub ends itself still closes straight away.
+- **No hub changes:** these are client-side only. The new login is a normal password + code login, so it works with any 1.10 hub.
 
 ### Dynamic DNS (DuckDNS)
 

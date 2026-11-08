@@ -138,6 +138,7 @@ fun HubScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            item { LoginModeBanner() }
             item { ApkUpdateCard(info) }
             if (info.computers.isNotEmpty()) {
                 item { SectionTitle("Remote Desktop") }

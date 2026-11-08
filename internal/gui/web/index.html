@@ -294,6 +294,63 @@
     </ol>
     <p class="muted">Tip: the first time, Remote Desktop may warn that the certificate name doesn't match (it sees 127.0.0.x). That's expected with a tunnel. Tick "Don't ask me again" for that computer.</p>
   </div>
+
+  <div class="card">
+    <h3>Local login at home, and switching to remote</h3>
+    <p><b>Local</b> logs in without password or code. It works only from your home network, and only on a PC you trusted from the hub screen (<i>This PC at home</i>) while logged in with password + code. The hub owner turns it on per user (<b>Users</b> tab).</p>
+    <ul>
+      <li><b>Leaving home?</b> Click <b>Switch to remote…</b> on the Connect tab and enter your password + code. SecuRDP logs in through your public address <i>before</i> letting go of the home login. Remote Desktop, open files and web pages stay open, on the same local ports.</li>
+      <li>A remote login always needs your password + code, so a trusted PC on its own is never enough away from home.</li>
+    </ul>
+    <h3>If the network drops</h3>
+    <p>When the connection drops, for example Wi-Fi switching to mobile data, SecuRDP keeps its local ports open for <b>5 minutes</b> instead of closing. The Connect tab shows <i>connection lost</i>.</p>
+    <ul>
+      <li><b>Local login:</b> it reconnects by itself as soon as you're back on your home network. Or click <b>Continue remotely</b> with your password + code.</li>
+      <li><b>Remote login:</b> enter your password + code and click <b>Reconnect</b>.</li>
+      <li>Remote Desktop reconnects by itself once the tunnel is back. Your Windows session is still where you left it.</li>
+      <li>After 5 minutes without reconnecting, or after Disconnect, everything closes as usual.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>App links: connecting your own app or game (Android)</h3>
+    <p>An app link lets an app on your phone reach <b>one</b> program on the hub PC at <code>127.0.0.1:&lt;port&gt;</code>, without your password or code. Examples: a game server, an AI helper or a home tool. The phone holds a key in its secure storage. The key reaches only that one program, and the hub logs every use.</p>
+    <h4>1. The program on the hub PC</h4>
+    <ul>
+      <li><b>Listen on a fixed TCP port</b>, e.g. <code>127.0.0.1:11435</code>. Listening on 127.0.0.1 is enough and safest, because the link connects from the hub itself.</li>
+      <li><b>Any TCP protocol works:</b> HTTP, WebSockets, gRPC or your own. The bytes pass through unchanged. <b>UDP isn't carried</b>, so a game that only speaks UDP needs a TCP mode.</li>
+      <li><b>Serve plain HTTP, not HTTPS.</b> The tunnel is already encrypted, and a certificate wouldn't match 127.0.0.1 on the phone.</li>
+      <li><b>Accept <code>Host: 127.0.0.1:&lt;port&gt;</code>.</b> Turn off any "allowed hosts" or cross-site check that would refuse it, or you'll get 403 / invalid host.</li>
+      <li><b>Check your own token</b> (e.g. an <code>Authorization: Bearer …</code> header). Any app on the phone can reach the port.</li>
+      <li><b>Keep it running</b>, e.g. a scheduled task "At startup" or a Windows service. SecuRDP doesn't start it.</li>
+    </ul>
+    <h4>2. SecuRDP on the hub (administrator)</h4>
+    <ol>
+      <li><b>Files &amp; Web</b> &rarr; add a web page, e.g. name <code>pet</code>, address <code>http://127.0.0.1:11435</code>. <b>Test</b> checks the port answers.</li>
+      <li><b>Users</b> &rarr; tick that page for the user, and tick <b>App links</b>.</li>
+    </ol>
+    <h4>3. On the phone</h4>
+    <ol>
+      <li>In SecuRDP, connect to the hub with password + code.</li>
+      <li>Under <b>App links</b>, tap <b>Link an app to pet</b> &rarr; <b>Pair</b>. Keep the suggested port (the page's own) so your app uses the same address everywhere.</li>
+      <li>The link shows <b>Ready</b> on SecuRDP's main screen. It starts with the phone and connects only while an app is using it.</li>
+    </ol>
+    <h4>4. In your Android app</h4>
+    <ul>
+      <li>Connect to <code>http://127.0.0.1:&lt;port&gt;</code>, the same as on the PC.</li>
+      <li>Android blocks plain HTTP by default, so allow it for 127.0.0.1 with a network security config (<code>cleartextTrafficPermitted="true"</code> for the domain <code>127.0.0.1</code>). The README has the snippet.</li>
+      <li>The first request after a pause takes 1–3 s while the link logs in. Later ones are immediate. Long connections such as WebSockets keep it up, and it logs out a minute after the last one closes.</li>
+      <li>Optional: at home, try the hub's LAN address first (if the program listens on 0.0.0.0 and the firewall allows it), then fall back to 127.0.0.1.</li>
+    </ul>
+    <h4>Troubleshooting (the link's status on the phone)</h4>
+    <ul>
+      <li><b>"The hub didn't open pet (is it running?)"</b>: the program isn't running, or isn't on the address you entered. Use <b>Test</b> on Files &amp; Web.</li>
+      <li><b>"refused this phone's key"</b>: the device was removed on the <b>Users</b> tab, App links was turned off, or the page was unticked. Pair again.</li>
+      <li><b>"Can't reach the hub"</b>: the phone is offline, or the hub's address or port changed.</li>
+      <li>The <b>Activity log</b> tab records every key login and refusal.</li>
+    </ul>
+    <p class="muted">To revoke: <b>Remove</b> on the phone, or <b>Remove</b> next to the device on the Users tab.</p>
+  </div>
 </section>
 </main>
 

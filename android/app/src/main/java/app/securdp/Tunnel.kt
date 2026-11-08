@@ -16,6 +16,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -180,6 +181,11 @@ private class Answers(private val password: String, private val code: String) :
  * Mirrors the Windows client: the tunnel stays open while any RDP connection
  * is open, and closes [graceMillis] after the last one ends (or if none is
  * opened within [startMillis]).
+ *
+ * The login underneath can change without closing anything: [switchRemote]
+ * moves a home (Local) login to password + code through [remoteHost], and a
+ * login that drops with the network keeps the local ports for [lostGraceMillis]
+ * (a home login retries by itself; otherwise [switchRemote] reconnects).
  */
 class Tunnel(
     private val host: String,
@@ -190,13 +196,33 @@ class Tunnel(
     private val listener: Listener,
     private val startMillis: Long = 5 * 60_000,
     private val graceMillis: Long = 2 * 60_000,
+    private val remoteHost: String = host,
+    private val remotePort: Int = port,
 ) {
     interface Listener {
         fun onActiveChanged(active: Int)
         fun onClosed(reason: String)
+        /** The login became a home one or not ([home]), or dropped and is waiting ([lost]). */
+        fun onLoginChanged(home: Boolean, lost: Boolean) {}
     }
 
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
+    @Volatile private var homeIdentity: com.jcraft.jsch.Identity? = null
+    @Volatile private var watching = false
+
+    /** The login is a home (Local) one. */
+    @Volatile var isHome = false
+        private set
+
+    /** The login dropped (network change); the ports wait for it to come back. */
+    @Volatile var isLost = false
+        private set
+    @Volatile private var lostSince = 0L
+    private val streams = ConcurrentHashMap<Session, AtomicInteger>()
+    private val retiring = ConcurrentHashMap.newKeySet<Session>()
+    private val holdChannels = mutableListOf<HoldChannel>()
+
+    private class HoldChannel(@Volatile var ch: ChannelDirectTCPIP?)
     private val servers = mutableListOf<ServerSocket>()
     private val active = AtomicInteger()
     private val holds = AtomicInteger() // files / web pages in use
@@ -207,6 +233,11 @@ class Tunnel(
     val localAddress: String get() = "127.0.0.1:$boundPort"
 
     companion object {
+        /** How long a dropped login keeps the ports; how often a home login retries meanwhile. */
+        @Volatile var lostGraceMillis = 5 * 60_000L
+        @Volatile var homeRetryMillis = 10_000L
+        @Volatile var aliveIntervalMillis = 10_000
+
         init {
             // Use Bouncy Castle for the modern algorithms; Android's JCA lacks
             // X25519 / Ed25519 / ChaCha20-Poly1305 on many versions.
@@ -234,7 +265,8 @@ class Tunnel(
      * only accepts it from the home network. Blocking.
      */
     fun connectHome(identity: com.jcraft.jsch.Identity) = try {
-        login(JSch().apply { addIdentity(identity, null) }) { s -> s.setConfig("PreferredAuthentications", "publickey") }
+        login(homeJsch(identity), home = true) { s -> s.setConfig("PreferredAuthentications", "publickey") }
+        homeIdentity = identity
     } catch (_: LoginFailedException) {
         throw Exception(
             "The hub didn't accept this phone's home login. It only works on your home network - " +
@@ -242,12 +274,26 @@ class Tunnel(
         )
     }
 
-    private fun login(jsch: JSch?, auth: (Session) -> Unit) {
+    private fun homeJsch(identity: com.jcraft.jsch.Identity) = JSch().apply { addIdentity(identity, null) }
+
+    private fun login(jsch: JSch?, home: Boolean = false, auth: (Session) -> Unit) {
+        session = dial(host, port, jsch, auth)
+        isHome = home
+        if (!watching) {
+            watching = true
+            thread(name = "securdp-watch", isDaemon = true) { watch() }
+        }
+        // Also covers a picker that is never answered.
+        scheduleIdle(startMillis)
+    }
+
+    private fun dial(h: String, p: Int, jsch: JSch?, auth: (Session) -> Unit): Session {
         val keys = PinnedHostKey(pinnedFingerprint)
-        val s = if (jsch != null) gateSession(host, port, username, keys, jsch) else gateSession(host, port, username, keys)
+        val s = if (jsch != null) gateSession(h, p, username, keys, jsch) else gateSession(h, p, username, keys)
         auth(s)
-        s.setServerAliveInterval(30_000)
-        s.setServerAliveCountMax(3)
+        // A dropped network is noticed within ~20 s.
+        s.setServerAliveInterval(aliveIntervalMillis)
+        s.setServerAliveCountMax(2)
         try {
             s.connect(15_000)
         } catch (e: JSchException) {
@@ -261,11 +307,89 @@ class Tunnel(
             if (msg.startsWith("Auth fail") || msg.startsWith("Auth cancel")) throw LoginFailedException()
             throw e
         }
-        session = s
-        thread(name = "securdp-watch", isDaemon = true) { watch() }
-        // Also covers a picker that is never answered.
-        scheduleIdle(startMillis)
+        return s
     }
+
+    /**
+     * Logs in with password + code through the public address and moves the
+     * tunnel onto that login: the local ports stay, connections already open
+     * finish on the old login. Leaves a home (Local) login, or reconnects a
+     * dropped one. Blocking.
+     */
+    fun switchRemote(password: String, code: String) {
+        val s = dial(remoteHost, remotePort, null) { s ->
+            s.setConfig("PreferredAuthentications", "keyboard-interactive")
+            s.userInfo = Answers(password, code)
+        }
+        attach(s, home = false)
+    }
+
+    private fun attach(s: Session, home: Boolean) {
+        val old: Session?
+        val wasLost: Boolean
+        synchronized(this) {
+            if (closed.get()) {
+                s.disconnect()
+                throw Exception("The connection already closed - connect again")
+            }
+            old = session
+            wasLost = isLost
+            session = s
+            isHome = home
+            isLost = false
+        }
+        synchronized(holdChannels) {
+            for (h in holdChannels) {
+                val prev = h.ch
+                h.ch = runCatching { openHold(s) }.getOrNull()
+                runCatching { prev?.disconnect() }
+            }
+        }
+        if (old != null && old !== s) {
+            retiring += old
+            if ((streams[old]?.get() ?: 0) <= 0) retire(old)
+        }
+        listener.onLoginChanged(home, false)
+        if (wasLost && active.get() == 0 && holds.get() == 0) scheduleIdle(graceMillis)
+    }
+
+    private fun retire(s: Session) {
+        retiring -= s
+        streams.remove(s)
+        runCatching { s.disconnect() }
+    }
+
+    /** The current login, or why there is none. */
+    private fun cur(): Session = session ?: throw IllegalStateException(
+        if (isLost) "The connection dropped - reconnect to continue" else "not connected",
+    )
+
+    /** Opens a forwarded channel on the current login, counted so a retired login closes when its last one ends. */
+    private fun openCounted(destHost: String, destPort: Int): Pair<Session, ChannelDirectTCPIP>? {
+        val s = session ?: return null
+        streams.getOrPut(s) { AtomicInteger() }.incrementAndGet()
+        return try {
+            s to (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+                setHost(destHost)
+                setPort(destPort)
+            }
+        } catch (_: Exception) {
+            release(s)
+            null
+        }
+    }
+
+    private fun release(s: Session) {
+        val n = streams[s]?.decrementAndGet() ?: 0
+        if (n <= 0 && s in retiring) retire(s)
+    }
+
+    private fun openHold(s: Session): ChannelDirectTCPIP =
+        (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
+            setHost("hold.securdp")
+            setPort(0)
+            connect(5_000)
+        }
 
     /** Which hub computer connections go to (null = the login's computer). */
     @Volatile var computer: String? = null
@@ -324,7 +448,7 @@ class Tunnel(
     private val svcBound = mutableSetOf<String>()
 
     private fun bindLocal(localPort: Int, destHost: String, destPort: Int, rdp: Boolean) {
-        val s = session ?: throw IllegalStateException("not connected")
+        val s = cur()
         // Built outside apply{}: inside it, `localPort` would be ServerSocket's own (-1).
         val bindAddr = InetSocketAddress(InetAddress.getByName("127.0.0.1"), localPort)
         val ss = try {
@@ -345,18 +469,15 @@ class Tunnel(
      * are in use. Close the returned handle to let go.
      */
     fun hold(): AutoCloseable {
-        val s = session ?: throw IllegalStateException("not connected")
-        val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
-            setHost("hold.securdp")
-            setPort(0)
-        }
-        ch.connect(5_000)
+        val h = HoldChannel(openHold(cur()))
+        synchronized(holdChannels) { holdChannels += h }
         holds.incrementAndGet()
         cancelIdle()
         val released = AtomicBoolean()
         return AutoCloseable {
             if (released.compareAndSet(false, true)) {
-                ch.disconnect()
+                synchronized(holdChannels) { holdChannels -= h }
+                runCatching { h.ch?.disconnect() }
                 if (holds.decrementAndGet() == 0 && active.get() == 0) scheduleIdle(graceMillis)
             }
         }
@@ -390,7 +511,7 @@ class Tunnel(
      * and SHA-256. [progress] gets (bytes so far, total). Returns its versionName.
      */
     fun downloadApk(out: OutputStream, progress: (Long, Long) -> Unit = { _, _ -> }): String {
-        val s = session ?: throw IllegalStateException("not connected")
+        val s = cur()
         val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
             setHost("apk.securdp")
             setPort(0)
@@ -425,7 +546,7 @@ class Tunnel(
     }
 
     private fun linkRequest(line: String) {
-        val s = session ?: throw IllegalStateException("not connected")
+        val s = cur()
         val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
             setHost("pair.securdp")
             setPort(0)
@@ -443,7 +564,7 @@ class Tunnel(
     }
 
     private fun readPseudo(host: String): String {
-        val s = session ?: throw IllegalStateException("not connected")
+        val s = cur()
         val pool = Executors.newSingleThreadExecutor()
         val task = pool.submit<String> {
             val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
@@ -474,7 +595,7 @@ class Tunnel(
     }
 
     fun fileRequest(op: String, vararg args: String, body: InputStream? = null, bodySize: Long = 0): FileReply {
-        val s = session ?: throw IllegalStateException("not connected")
+        val s = cur()
         val ch = (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
             setHost("files.securdp")
             setPort(0)
@@ -555,17 +676,48 @@ class Tunnel(
     fun close(reason: String = "Disconnected") {
         if (!closed.compareAndSet(false, true)) return
         synchronized(servers) { servers.forEach { runCatching { it.close() } } }
+        synchronized(holdChannels) { holdChannels.forEach { runCatching { it.ch?.disconnect() } } }
         runCatching { session?.disconnect() }
+        retiring.forEach { runCatching { it.disconnect() } }
         timer.shutdownNow()
         listener.onClosed(reason)
     }
 
+    /**
+     * Notices a login that dropped. The tunnel keeps its ports for
+     * [lostGraceMillis]: a home login quietly retries, otherwise
+     * [switchRemote] (password + code) brings it back.
+     */
     private fun watch() {
+        var lastTry = 0L
         while (!closed.get()) {
-            Thread.sleep(2_000)
-            if (session?.isConnected != true) {
+            try { Thread.sleep(500) } catch (_: InterruptedException) { return }
+            val s = session
+            if (s != null && !s.isConnected) {
+                synchronized(this) {
+                    if (session === s) {
+                        session = null
+                        isLost = true
+                        lostSince = System.currentTimeMillis()
+                    }
+                }
+                streams.remove(s)
+                if (isLost) listener.onLoginChanged(isHome, true)
+                lastTry = System.currentTimeMillis()
+            }
+            if (!isLost) continue
+            val now = System.currentTimeMillis()
+            if (now - lostSince >= lostGraceMillis) {
                 close("Connection to the server was lost")
                 return
+            }
+            val id = homeIdentity
+            if (isHome && id != null && now - lastTry >= homeRetryMillis) {
+                lastTry = now
+                runCatching {
+                    val back = dial(host, port, homeJsch(id)) { it.setConfig("PreferredAuthentications", "publickey") }
+                    attach(back, home = true)
+                }
             }
         }
     }
@@ -574,7 +726,8 @@ class Tunnel(
     private fun scheduleIdle(delay: Long) {
         idleTask?.cancel(false)
         if (closed.get()) return
-        idleTask = timer.schedule({ close("Closed: no Remote Desktop connection") }, delay, TimeUnit.MILLISECONDS)
+        // While a dropped login waits, the lost-connection grace decides instead.
+        idleTask = timer.schedule({ if (!isLost) close("Closed: no Remote Desktop connection") }, delay, TimeUnit.MILLISECONDS)
     }
 
     @Synchronized
@@ -594,15 +747,7 @@ class Tunnel(
 
     /** Web service connection: forwarded, but not counted as a Remote Desktop session. */
     private fun relay(sock: Socket, destHost: String, destPort: Int) {
-        val s = session ?: return sock.close()
-        val ch = try {
-            (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
-                setHost(destHost)
-                setPort(destPort)
-            }
-        } catch (_: Exception) {
-            sock.close(); return
-        }
+        val (s, ch) = openCounted(destHost, destPort) ?: return sock.close()
         val fromServer = ch.inputStream
         val toServer = ch.outputStream
         try {
@@ -615,26 +760,20 @@ class Tunnel(
         } finally {
             runCatching { sock.close() }
             runCatching { ch.disconnect() }
+            release(s)
         }
     }
 
     private fun forward(sock: Socket, destHost: String, destPort: Int) {
-        val s = session ?: return sock.close()
-        val ch = try {
-            // A computer name asks the hub for that PC; 127.0.0.1 means the
-            // login's computer (what older gates expect).
-            (s.openChannel("direct-tcpip") as ChannelDirectTCPIP).apply {
-                setHost(destHost)
-                setPort(destPort)
-            }
-        } catch (_: Exception) {
-            sock.close(); return
-        }
+        // A computer name asks the hub for that PC; 127.0.0.1 means the
+        // login's computer (what older gates expect).
+        val (s, ch) = openCounted(destHost, destPort) ?: return sock.close()
         val fromServer = ch.inputStream
         val toServer = ch.outputStream
         try {
             ch.connect(10_000)
         } catch (_: Exception) {
+            release(s)
             sock.close(); return
         }
         cancelIdle()
@@ -648,6 +787,7 @@ class Tunnel(
         } finally {
             runCatching { sock.close() }
             runCatching { ch.disconnect() }
+            release(s)
             val n = active.decrementAndGet()
             listener.onActiveChanged(n)
             if (n == 0 && holds.get() == 0) scheduleIdle(graceMillis)

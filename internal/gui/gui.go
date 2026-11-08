@@ -268,6 +268,7 @@ func (a *app) routes() http.Handler {
 	a.sessionRoutes(mux)
 	a.homeRoutes(mux)
 	a.api(mux, "/api/disconnect", false, a.disconnect)
+	a.api(mux, "/api/switch", false, a.switchRemote)
 
 	return a.guard(mux)
 }
@@ -349,6 +350,7 @@ func (a *app) state(*http.Request) (any, error) {
 	st["profiles"] = profiles
 	a.mu.Lock()
 	conn := map[string]string{}
+	homeConn, lost := map[string]bool{}, map[string]bool{} // Local logins / Local logins that dropped
 	for n, t := range a.tunnels {
 		select {
 		case <-t.Done():
@@ -358,6 +360,7 @@ func (a *app) state(*http.Request) (any, error) {
 			if t.Computer != "" {
 				conn[n] += " → " + t.Computer
 			}
+			homeConn[n], lost[n] = t.Home(), t.Lost()
 		}
 	}
 	hubs := map[string]*client.HubInfo{}
@@ -372,6 +375,8 @@ func (a *app) state(*http.Request) (any, error) {
 	a.mu.Unlock()
 	st["update"] = update
 	st["connected"] = conn
+	st["home_connected"] = homeConn
+	st["lost"] = lost
 	st["hubs"] = hubs
 	st["external"] = external
 	return st, nil
@@ -716,6 +721,34 @@ func (a *app) startForward(name string, t *client.Tunnel, computer string, remem
 	a.tunnels[name] = t
 	a.mu.Unlock()
 	return map[string]string{"status": "connected", "local": t.LocalAddr, "computer": computer}, nil
+}
+
+// switchRemote moves a Local (home) login to password + code through the
+// profile's public address, keeping its ports, Remote Desktop window and
+// pages open - before leaving home, or after the home connection dropped.
+func (a *app) switchRemote(r *http.Request) (any, error) {
+	in, err := decode[struct{ Name, Password, Code string }](r)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	t := a.tunnels[in.Name]
+	s := a.sessions[in.Name]
+	a.mu.Unlock()
+	if t == nil {
+		return nil, errors.New("not connected - use Connect")
+	}
+	if err := t.SwitchRemote(in.Password, in.Code); err != nil {
+		return nil, err
+	}
+	if s != nil {
+		if info, err := t.Info(); err == nil && info != nil {
+			a.mu.Lock()
+			s.info = info
+			a.mu.Unlock()
+		}
+	}
+	return map[string]string{"status": "switched"}, nil
 }
 
 func (a *app) disconnect(r *http.Request) (any, error) {

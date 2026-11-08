@@ -31,10 +31,36 @@ sealed interface TunnelState {
     data class Failed(val message: String) : TunnelState
 }
 
+/** How the current tunnel is logged in: [home] = Local; [lost] = dropped, waiting to reconnect. */
+data class LoginMode(val home: Boolean = false, val lost: Boolean = false)
+
 /** Process-wide tunnel state shared by the UI and the service. */
 object TunnelManager {
     private val _state = MutableStateFlow<TunnelState>(TunnelState.Idle)
     val state: StateFlow<TunnelState> = _state
+    private val _login = MutableStateFlow(LoginMode())
+    val login: StateFlow<LoginMode> = _login
+    internal fun setLogin(m: LoginMode) { _login.value = m }
+
+    /**
+     * Moves the tunnel to a password + code login through the profile's public
+     * address, keeping Remote Desktop, files and pages open: leaves a Local
+     * login, or reconnects one that dropped. [done] gets null or the error.
+     */
+    fun switchRemote(password: String, code: String, done: (String?) -> Unit) {
+        val t = tunnel ?: return done("Not connected")
+        thread(name = "securdp-switch") {
+            val err = try {
+                t.switchRemote(password, code)
+                null
+            } catch (_: LoginFailedException) {
+                "Login failed - check your password and code (too many failures block your IP for a while)."
+            } catch (e: Exception) {
+                e.message ?: e.toString()
+            }
+            android.os.Handler(android.os.Looper.getMainLooper()).post { done(err) }
+        }
+    }
 
     // Credentials stay in memory only, never in an Intent or on disk.
     internal var pending: Triple<Profile, String, String>? = null
@@ -162,7 +188,22 @@ class TunnelService : Service() {
             val t = Tunnel(
                 host = host, port = port, username = profile.username,
                 pinnedFingerprint = profile.hostFingerprint, localPort = profile.localPort,
+                remoteHost = profile.host, remotePort = profile.port,
                 listener = object : Tunnel.Listener {
+                    override fun onLoginChanged(home: Boolean, lost: Boolean) {
+                        TunnelManager.setLogin(LoginMode(home, lost))
+                        val p = current ?: profile
+                        updateNotification(notification(
+                            when {
+                                lost && home -> "Connection lost - reconnects at home, or log in to continue remotely · ${label(p)}"
+                                lost -> "Connection lost - open SecuRDP to reconnect · ${label(p)}"
+                                home -> "Connected locally · ${label(p)}"
+                                else -> "Connected · ${label(p)}"
+                            },
+                            p,
+                        ))
+                    }
+
                     override fun onActiveChanged(active: Int) {
                         val p = current ?: profile
                         TunnelManager.set(TunnelState.Connected(p, active, computer, hubInfo))
@@ -172,6 +213,7 @@ class TunnelService : Service() {
 
                     override fun onClosed(reason: String) {
                         TunnelManager.tunnel = null
+                        TunnelManager.setLogin(LoginMode())
                         TunnelManager.clearExternal()
                         current = null
                         TunnelManager.set(if (reason == "Disconnected") TunnelState.Idle else TunnelState.Failed(reason))
@@ -188,6 +230,7 @@ class TunnelService : Service() {
                     t.connect(password, code)
                 }
                 TunnelManager.tunnel = t
+                TunnelManager.setLogin(LoginMode(home = home))
                 val info = t.info()
                 val saved = info.computers.firstOrNull { it.name == profile.computer && profile.computer.isNotEmpty() }
                 when {

@@ -36,7 +36,7 @@ import (
 //	hub computers: desktop (default, echo) and laptop (greets "laptop;" then echoes).
 //	shared folders: media (read-only samples), drop (writable); web page: status.
 //	probe.four may pair app links (devices reaching "status" by key).
-//	probe.five may trust home devices; the "home network" is loopback.
+//	probe.five and probe.six may trust home devices; the "home network" is loopback.
 func TestServeForExternalClient(t *testing.T) {
 	addr := os.Getenv("SECURDP_SERVE_ADDR")
 	if addr == "" {
@@ -78,6 +78,7 @@ func TestServeForExternalClient(t *testing.T) {
 		{Username: "probe.three", PasswordHash: hash, TOTPSecret: enc, Enabled: true},
 		{Username: "probe.four", PasswordHash: hash, TOTPSecret: enc, Enabled: true, AppLinks: true},
 		{Username: "probe.five", PasswordHash: hash, TOTPSecret: enc, Enabled: true, HomeLogin: true},
+		{Username: "probe.six", PasswordHash: hash, TOTPSecret: enc, Enabled: true, HomeLogin: true},
 	}
 
 	// Files & web: "media" (read-only sample images, plus SECURDP_SERVE_MEDIA

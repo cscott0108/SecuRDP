@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,7 +44,7 @@ func (t *Tunnel) readAll(dest string, wait time.Duration) ([]byte, error) {
 	}
 	c := make(chan res, 1)
 	go func() {
-		ch, err := t.ssh.Dial("tcp", dest)
+		ch, err := t.open(dest)
 		if err != nil {
 			c <- res{nil, err}
 			return
@@ -105,7 +106,7 @@ func (t *Tunnel) Trust(device, publicKey string) error {
 func (t *Tunnel) Untrust(device string) error { return t.pairRequest("untrust\t" + device) }
 
 func (t *Tunnel) pairRequest(line string) error {
-	ch, err := t.ssh.Dial("tcp", "pair.securdp:0")
+	ch, err := t.open("pair.securdp:0")
 	if err != nil {
 		return fmt.Errorf("the hub refused: %w", err)
 	}
@@ -131,7 +132,7 @@ func (t *Tunnel) pairRequest(line string) error {
 // size and SHA-256 as it goes. It returns the version the hub says it is.
 // Only call it when Info reported a Version (older hubs don't serve it).
 func (t *Tunnel) DownloadUpdate(w io.Writer) (string, error) {
-	ch, err := t.ssh.Dial("tcp", "update.securdp:0")
+	ch, err := t.open("update.securdp:0")
 	if err != nil {
 		return "", fmt.Errorf("the hub refused the update: %w", err)
 	}
@@ -165,11 +166,27 @@ func (t *Tunnel) DownloadUpdate(w io.Writer) (string, error) {
 // Hold keeps the tunnel open on the hub while files or web pages are in use
 // (no Remote Desktop session needed). Call the returned func to let go.
 func (t *Tunnel) Hold() (func(), error) {
-	ch, err := t.ssh.Dial("tcp", "hold.securdp:0")
+	l, err := t.conn()
 	if err != nil {
 		return func() {}, err
 	}
-	return func() { ch.Close() }, nil
+	ch, err := l.c.Dial("tcp", "hold.securdp:0")
+	if err != nil {
+		return func() {}, err
+	}
+	h := &hold{ch: ch}
+	t.mu.Lock()
+	t.holds[h] = true
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			delete(t.holds, h)
+			t.mu.Unlock()
+			h.close()
+		})
+	}, nil
 }
 
 // FileEntry is one item of a folder listing.
@@ -183,7 +200,7 @@ type FileEntry struct {
 // fileRequest sends one request and returns the channel positioned after
 // the status line, plus the status line's number field.
 func (t *Tunnel) fileRequest(body io.Reader, op string, args ...string) (io.ReadCloser, int64, error) {
-	ch, err := t.ssh.Dial("tcp", "files.securdp:0")
+	ch, err := t.open("files.securdp:0")
 	if err != nil {
 		return nil, 0, fmt.Errorf("file access refused: %w", err)
 	}

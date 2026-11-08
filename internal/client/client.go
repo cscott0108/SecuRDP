@@ -38,8 +38,11 @@ type Tunnel struct {
 	LocalAddr string
 	Computer  string // hub computer being forwarded to ("" = the login's)
 	profile   config.Profile
-	ssh       *ssh.Client
 	mu        sync.Mutex
+	cur       *link      // the login new connections use; nil while a dropped login waits (Lost)
+	home      bool       // the login is a home (key) login
+	homeKey   ssh.Signer // for quietly retrying a dropped home login
+	holds     map[*hold]bool
 	listeners []net.Listener
 	uses      atomic.Int32
 	active    atomic.Int32
@@ -48,10 +51,38 @@ type Tunnel struct {
 	done      chan struct{}
 }
 
-// Connect authenticates to the gate. Call Listen (after Computers, for a
-// picker) to start forwarding.
-func Connect(p config.Profile, password, code string) (*Tunnel, error) {
-	t, err := dial(p, p.Host, ssh.KeyboardInteractive(func(name, instr string, qs []string, echos []bool) ([]string, error) {
+// A link is one SSH login. After SwitchRemote the old link stays open until
+// the connections it carries (e.g. a Remote Desktop session) end.
+type link struct {
+	c        *ssh.Client
+	streams  atomic.Int32
+	retiring atomic.Bool
+	dropped  atomic.Bool // keepalive gave up on it (the network went away)
+}
+
+func (l *link) release() {
+	if l.streams.Add(-1) <= 0 && l.retiring.Load() {
+		l.c.Close()
+	}
+}
+
+// LostGrace is how long a tunnel whose login dropped with the network (Wi-Fi
+// to mobile data, leaving home) keeps its ports before it closes. A home
+// login retries by itself every HomeRetry; otherwise SwitchRemote (password
+// + code) reconnects it. Remote Desktop reconnects by itself either way.
+var (
+	LostGrace = 5 * time.Minute
+	HomeRetry = 10 * time.Second
+
+	keepaliveEvery   = 30 * time.Second
+	keepaliveTimeout = 15 * time.Second
+)
+
+// SetKeepalive changes how often logins are checked (for tests).
+func SetKeepalive(every, timeout time.Duration) { keepaliveEvery, keepaliveTimeout = every, timeout }
+
+func keyboardAuth(password, code string) ssh.AuthMethod {
+	return ssh.KeyboardInteractive(func(name, instr string, qs []string, echos []bool) ([]string, error) {
 		ans := make([]string, len(qs))
 		for i, q := range qs {
 			lq := strings.ToLower(q)
@@ -63,11 +94,24 @@ func Connect(p config.Profile, password, code string) (*Tunnel, error) {
 			}
 		}
 		return ans, nil
-	}))
+	})
+}
+
+func loginError(err error) error {
 	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
-		return nil, errors.New("login failed - check username, password and authenticator code (too many failures will block your IP for a while)")
+		return errors.New("login failed - check username, password and authenticator code (too many failures will block your IP for a while)")
 	}
-	return t, err
+	return err
+}
+
+// Connect authenticates to the gate. Call Listen (after Computers, for a
+// picker) to start forwarding.
+func Connect(p config.Profile, password, code string) (*Tunnel, error) {
+	c, err := dial(p, p.Host, keyboardAuth(password, code))
+	if err != nil {
+		return nil, loginError(err)
+	}
+	return newTunnel(p, c, false), nil
 }
 
 // ConnectHome logs in with this PC's trusted home key: no password or code.
@@ -78,14 +122,203 @@ func ConnectHome(p config.Profile, key ssh.Signer) (*Tunnel, error) {
 	if p.HomeHost != "" {
 		host = p.HomeHost
 	}
-	t, err := dial(p, host, ssh.PublicKeys(key))
+	c, err := dial(p, host, ssh.PublicKeys(key))
 	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
 		return nil, errors.New("the hub didn't accept this PC's home login - it only works on your home network (use Connect with password + code away from home), or it was removed on the hub")
 	}
-	return t, err
+	if err != nil {
+		return nil, err
+	}
+	t := newTunnel(p, c, true)
+	t.homeKey = key
+	return t, nil
 }
 
-func dial(p config.Profile, host string, auth ssh.AuthMethod) (*Tunnel, error) {
+func newTunnel(p config.Profile, c *ssh.Client, home bool) *Tunnel {
+	t := &Tunnel{profile: p, cur: &link{c: c}, home: home, holds: map[*hold]bool{}, done: make(chan struct{})}
+	go t.watch(t.cur)
+	go t.keepalive()
+	return t
+}
+
+func (t *Tunnel) homeHost() string {
+	if t.profile.HomeHost != "" {
+		return t.profile.HomeHost
+	}
+	return t.profile.Host
+}
+
+// SwitchRemote moves the tunnel to a normal password + code login through
+// the profile's public address, without closing anything: the local ports
+// stay, new connections use the new login, and connections already open
+// finish on the old one. Use it to leave a home (Local) login, or to
+// reconnect a login that dropped with the network.
+func (t *Tunnel) SwitchRemote(password, code string) error {
+	c, err := dial(t.profile, t.profile.Host, keyboardAuth(password, code))
+	if err != nil {
+		return loginError(err)
+	}
+	return t.attach(c, false)
+}
+
+// attach makes c the tunnel's login, moving holds over and retiring the old
+// login once its connections end.
+func (t *Tunnel) attach(c *ssh.Client, home bool) error {
+	l := &link{c: c}
+	t.mu.Lock()
+	select {
+	case <-t.done:
+		t.mu.Unlock()
+		c.Close()
+		return errors.New("the connection already closed - connect again")
+	default:
+	}
+	old := t.cur
+	t.cur, t.home = l, home
+	holds := make([]*hold, 0, len(t.holds))
+	for h := range t.holds {
+		holds = append(holds, h)
+	}
+	t.mu.Unlock()
+	go t.watch(l)
+	for _, h := range holds {
+		h.move(l)
+	}
+	if old != nil {
+		old.retiring.Store(true)
+		if old.streams.Load() <= 0 {
+			old.c.Close()
+		}
+	}
+	return nil
+}
+
+// Home reports whether the tunnel uses a home (Local) login; Lost whether
+// its login dropped with the network and it is waiting to reconnect.
+func (t *Tunnel) Home() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.home
+}
+
+func (t *Tunnel) Lost() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cur == nil
+}
+
+// watch notices when a login ends. A login that dropped with the network
+// keeps the tunnel's ports for LostGrace (a home login retries by itself);
+// one the hub closed ends the tunnel.
+func (t *Tunnel) watch(l *link) {
+	err := l.c.Wait()
+	t.mu.Lock()
+	if t.cur != l {
+		t.mu.Unlock() // an old login after a switch, or closing
+		return
+	}
+	if !l.dropped.Load() && (err == nil || errors.Is(err, io.EOF)) {
+		t.mu.Unlock() // the hub ended it
+		t.Close()
+		return
+	}
+	t.cur = nil
+	home := t.home && t.homeKey != nil
+	t.mu.Unlock()
+	deadline := time.Now().Add(LostGrace)
+	go func() {
+		for time.Now().Before(deadline) {
+			select {
+			case <-t.done:
+				return
+			case <-time.After(min(HomeRetry, time.Until(deadline))):
+			}
+			if !t.Lost() {
+				return // reconnected with password + code
+			}
+			if home {
+				if c, err := dial(t.profile, t.homeHost(), ssh.PublicKeys(t.homeKey)); err == nil {
+					if t.attach(c, true) == nil {
+						return
+					}
+				}
+			}
+		}
+		if t.Lost() {
+			t.Close()
+		}
+	}()
+}
+
+// conn returns the current login, or an error while a home login is lost.
+func (t *Tunnel) conn() (*link, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cur == nil {
+		return nil, errors.New("the connection dropped - reconnect to continue")
+	}
+	return t.cur, nil
+}
+
+// open dials dest through the current login. The connection is counted on
+// that login, so a retired login closes once its last connection ends.
+func (t *Tunnel) open(dest string) (net.Conn, error) {
+	l, err := t.conn()
+	if err != nil {
+		return nil, err
+	}
+	l.streams.Add(1)
+	ch, err := l.c.Dial("tcp", dest)
+	if err != nil {
+		l.release()
+		return nil, err
+	}
+	return &countedConn{Conn: ch, l: l}, nil
+}
+
+type countedConn struct {
+	net.Conn
+	l    *link
+	once sync.Once
+}
+
+func (c *countedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.l.release)
+	return err
+}
+
+// A hold keeps the hub-side session open (hold.securdp); it moves to the new
+// login on SwitchRemote.
+type hold struct {
+	mu sync.Mutex
+	ch net.Conn
+}
+
+func (h *hold) move(l *link) {
+	ch, err := l.c.Dial("tcp", "hold.securdp:0")
+	h.mu.Lock()
+	old := h.ch
+	h.ch = nil
+	if err == nil {
+		h.ch = ch
+	}
+	h.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+func (h *hold) close() {
+	h.mu.Lock()
+	if h.ch != nil {
+		h.ch.Close()
+		h.ch = nil
+	}
+	h.mu.Unlock()
+}
+
+func dial(p config.Profile, host string, auth ssh.AuthMethod) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{
 		Config: ssh.Config{
 			KeyExchanges: []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519},
@@ -123,10 +356,7 @@ func dial(p config.Profile, host string, auth ssh.AuthMethod) (*Tunnel, error) {
 		return nil, err
 	}
 
-	t := &Tunnel{profile: p, ssh: c, done: make(chan struct{})}
-	go t.keepalive()
-	go func() { c.Wait(); t.Close() }()
-	return t, nil
+	return c, nil
 }
 
 // Dial logs in and starts forwarding to the login's computer (the
@@ -159,7 +389,7 @@ func (t *Tunnel) Computers() ([]HubComputer, error) {
 	}
 	res := make(chan result, 1)
 	go func() {
-		ch, err := t.ssh.Dial("tcp", "list.securdp:0")
+		ch, err := t.open("list.securdp:0")
 		if err != nil {
 			res <- result{nil, err}
 			return
@@ -246,7 +476,7 @@ func (t *Tunnel) serve(ln net.Listener, dest string, rdp bool) {
 		}
 		go func() {
 			defer lc.Close()
-			rc, err := t.ssh.Dial("tcp", dest)
+			rc, err := t.open(dest)
 			if err != nil {
 				return
 			}
@@ -265,16 +495,32 @@ func (t *Tunnel) serve(ln net.Listener, dest string, rdp bool) {
 	}
 }
 
+// keepalive checks the current login every 30 s. A login that doesn't answer
+// within 15 s (e.g. the network went away) is closed, so watch notices.
 func (t *Tunnel) keepalive() {
-	tk := time.NewTicker(30 * time.Second)
+	tk := time.NewTicker(keepaliveEvery)
 	defer tk.Stop()
 	for {
 		select {
 		case <-t.done:
 			return
 		case <-tk.C:
-			if _, _, err := t.ssh.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				t.Close()
+			l, err := t.conn()
+			if err != nil {
+				continue
+			}
+			res := make(chan error, 1)
+			go func() { _, _, err := l.c.SendRequest("keepalive@openssh.com", true, nil); res <- err }()
+			select {
+			case err := <-res:
+				if err != nil {
+					l.dropped.Store(true)
+					l.c.Close()
+				}
+			case <-time.After(keepaliveTimeout):
+				l.dropped.Store(true)
+				l.c.Close()
+			case <-t.done:
 				return
 			}
 		}
@@ -290,8 +536,17 @@ func (t *Tunnel) Close() {
 		for _, ln := range t.listeners {
 			ln.Close()
 		}
+		l := t.cur
+		t.cur = nil
+		holds := t.holds
+		t.holds = map[*hold]bool{}
 		t.mu.Unlock()
-		t.ssh.Close()
+		for h := range holds {
+			h.close()
+		}
+		if l != nil {
+			l.c.Close()
+		}
 		close(t.done)
 	})
 }

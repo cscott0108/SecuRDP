@@ -694,7 +694,7 @@ $("uw-code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("uw-c
 let profilesSig = "";
 function renderProfiles() {
   // Only rebuild when something changed, so a half-typed password isn't wiped by the poll.
-  const sig = JSON.stringify([state.profiles, state.connected, Object.keys(state.hubs || {})]);
+  const sig = JSON.stringify([state.profiles, state.connected, state.home_connected, state.lost, Object.keys(state.hubs || {})]);
   if (sig === profilesSig) return;
   profilesSig = sig;
   const box = $("profiles");
@@ -705,12 +705,23 @@ function renderProfiles() {
   if (!profiles.length) box.append(el("p", { class: "muted" }, "No saved computers yet. Click \"Add computer\"."));
   for (const p of profiles) {
     const local = (state.connected || {})[p.name];
+    const atHome = local && (state.home_connected || {})[p.name];
+    const lost = local && (state.lost || {})[p.name];
+    // Connected with Local: the same form switches to a password + code login.
+    const switching = atHome || lost;
     const pw = el("input", { type: "password", placeholder: "Gate password", autocomplete: "off" });
     const code = el("input", { inputmode: "numeric", maxlength: "6", placeholder: "Authenticator code" });
-    const go = el("button", { class: "primary" }, "Connect");
-    const form = el("div", { class: "login-form inline" + (openName === p.name ? "" : " hidden") }, pw, code, go);
+    const go = el("button", { class: "primary" }, lost ? (atHome ? "Continue remotely" : "Reconnect") : switching ? "Switch" : "Connect");
+    const form = el("div", { class: "login-form inline" + (openName === p.name || lost ? "" : " hidden") }, pw, code, go);
     form.dataset.name = p.name;
     const doConnect = () => run(go, async () => {
+      if (switching) {
+        await api("switch", { name: p.name, password: pw.value, code: code.value.trim() });
+        toast(lost ? "Reconnected. Remote Desktop and open pages carry on." : "Switched to remote. Remote Desktop and open pages carry on.", "ok");
+        pw.value = code.value = "";
+        await refresh();
+        return;
+      }
       await connect(p.name, pw.value, code.value.trim(), "");
       pw.value = code.value = "";
     });
@@ -723,12 +734,16 @@ function renderProfiles() {
         el("div", { class: "row-between" },
           el("div", {},
             el("b", {}, p.name), " ",
-            local ? el("span", { class: "pill good" }, "connected") : "",
+            lost ? el("span", { class: "pill warn" }, "connection lost")
+              : local ? el("span", { class: "pill good" }, atHome ? "connected · local" : "connected") : "",
             el("div", { class: "muted small" }, `${p.host}:${p.port} · gate user ${p.username}` + (p.computer ? ` · always ${p.computer}` : "") + (p.rdp_username ? ` · Windows user ${p.rdp_username}` : "") + (p.host_fingerprint ? " · identity verified" : " · not yet verified"))
           ),
           el("div", { class: "actions tight" },
             local && (state.hubs || {})[p.name]
               ? el("button", { class: "primary", onclick: () => openHub(p.name, state.hubs[p.name]) }, "Open hub")
+              : "",
+            atHome && !lost
+              ? el("button", { title: "Log in with password + code through your public address, keeping Remote Desktop and pages open - do this before you leave home", onclick: () => { form.classList.toggle("hidden"); pw.focus(); } }, "Switch to remote…")
               : "",
             local
               ? el("button", { class: "danger", onclick: (e) => run(e.target, async () => { await api("disconnect", { name: p.name }); await refresh(); }) }, "Disconnect")
@@ -744,9 +759,17 @@ function renderProfiles() {
             }) }, "Delete")
           )
         ),
-        local ? el("div", { class: "muted small" }, (state.hubs || {})[p.name]
-          ? "Connected to the hub. The connection closes after you click Done and nothing (Remote Desktop, files, web pages) is open."
-          : `Tunnel open at ${local}. Close Remote Desktop to end the session.`) : form
+        lost ? el("div", {},
+          el("div", { class: "muted small" }, atHome
+            ? "The home connection dropped. It reconnects by itself if you're back on your home network - or enter your password + code to continue remotely. Remote Desktop and open pages carry on either way. Otherwise it closes after 5 minutes."
+            : "The connection dropped (network change?). Enter your password + code to reconnect - Remote Desktop and open pages carry on. Otherwise it closes after 5 minutes."),
+          form)
+        : local ? el("div", {},
+          el("div", { class: "muted small" }, (state.hubs || {})[p.name]
+            ? "Connected to the hub. The connection closes after you click Done and nothing (Remote Desktop, files, web pages) is open."
+            : `Tunnel open at ${local}. Close Remote Desktop to end the session.`),
+          atHome ? form : "")
+        : form
       )
     );
   }
